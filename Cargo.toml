@@ -1,0 +1,38 @@
+[package]
+name = "my-life-planner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Web 框架
+axum = "0.7"
+
+# 异步运行时 (Rust 的异步引擎)
+tokio = { version = "1", features = ["full"] }
+
+# 数据库驱动 (PostgreSQL)
+# runtime-tokio: 指定异步运行时
+# tls-native-tls: 处理数据库连接的加密
+sqlx = { version = "0.7", features = ["runtime-tokio", "tls-native-tls", "postgres", "chrono", "uuid"] }
+
+# 序列化/反序列化 (JSON处理)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 环境变量读取
+dotenvy = "0.15"
+
+#处理数据库中的时间字段
+chrono = { version = "0.4", features = ["serde"] }
+
+# 日志追踪
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+argon2 = "0.5"
+rand_core = { version = "0.6", features = ["std"] }
+jsonwebtoken = "9"
+axum-extra = { version = "0.9", features = ["typed-header"] }
+headers = "0.4"
+
+tower-http = { version = "0.5", features = ["cors"] }
