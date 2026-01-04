@@ -14,6 +14,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod handlers;
 mod models;
 mod auth;
+mod error; // 引入新模块
+pub use error::AppError; // 导出方便其他地方使用
+
 // 使用 handlers 中的函数
 use handlers::{
     create_plan_handler, delete_plan_handler, get_plans_handler, update_plan_handler,

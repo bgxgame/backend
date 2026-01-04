@@ -20,7 +20,7 @@ use axum_extra::{
     TypedHeader,
 };
 use serde_json::json;
-
+use crate::AppError; // 引入自定义错误
 // --- 1. 密码处理 ---
 
 // 加密密码
@@ -89,14 +89,14 @@ impl<S> FromRequestParts<S> for AuthUser
 where
     S: Send + Sync,
 {
-    type Rejection = (StatusCode, Json<serde_json::Value>);
+    type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         // 1. 从 Header 提取 Bearer Token
         let TypedHeader(Authorization(bearer)) = parts
             .extract::<TypedHeader<Authorization<Bearer>>>()
             .await
-            .map_err(|_| (StatusCode::UNAUTHORIZED, Json(json!({"error": "Missing or invalid token"}))))?;
+            .map_err(|_| AppError::Auth("Missing or invalid token".into()))?;
 
         // 2. 验证 Token
         let secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "secret".into());
@@ -105,7 +105,7 @@ where
             &DecodingKey::from_secret(secret.as_bytes()),
             &Validation::new(Algorithm::HS256),
         )
-        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(json!({"error": "Invalid token"}))))?;
+        .map_err(|_| AppError::Auth("Invalid token".into()))?;
 
         // 3. 验证通过，返回 AuthUser
         Ok(AuthUser {
