@@ -24,6 +24,7 @@ pub struct Plan {
     pub description: Option<String>,
     pub status: String,
     pub category: Option<String>,
+    pub priority: i32,
     pub due_date: Option<DateTime<Utc>>,
     pub is_public: bool,
     pub created_at: Option<DateTime<Utc>>,
@@ -39,6 +40,7 @@ pub struct CreatePlanSchema {
     pub description: Option<String>,
     #[validate(length(max = 50, message = "分类名称过长"))]
     pub category: Option<String>,
+    pub priority: Option<i32>,
     pub due_date: Option<DateTime<Utc>>,
     #[serde(default = "default_is_public")]
     pub is_public: bool,
@@ -55,6 +57,7 @@ pub struct UpdatePlanSchema {
     pub description: Option<String>,
     pub status: Option<String>,
     pub category: Option<String>,
+    pub priority: Option<i32>,
     pub due_date: Option<DateTime<Utc>>,
     pub is_public: Option<bool>,
 }

@@ -61,7 +61,6 @@ impl IntoResponse for AppError {
                 // 将复杂的校验错误对象转为简单易读的字符串或 JSON
                 (StatusCode::BAD_REQUEST, format!("输入参数有误: {}", e))
             },
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".into())
         };
 
         let body = Json(json!({

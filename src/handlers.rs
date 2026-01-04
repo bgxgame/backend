@@ -17,7 +17,7 @@ use axum::{
     Json,
 };
 use serde_json::json; // <--- 修复报错：引入 json! 宏 // 引入自定义错误
-use validator::Validate; 
+use crate::validation::ValidatedJson; // 引入我们的提取器
 
 // --- 1. 获取列表 (GET /plans) ---
 pub async fn get_plans_handler(
@@ -41,24 +41,24 @@ pub async fn get_plans_handler(
 pub async fn create_plan_handler(
     user: AuthUser, // 强制要求登录
     State(state): State<AppState>,
-    Json(body): Json<CreatePlanSchema>,
+    ValidatedJson(body): ValidatedJson<CreatePlanSchema>, // 这里的 ValidatedJson 会自动校验
 ) -> Result<Json<Plan>, AppError> {
 
-    // 插入数据并返回新创建的记录
+    // 插入数据 
     let plan = sqlx::query_as::<_, Plan>(
-        "INSERT INTO plans (title, description, category, due_date, is_public, user_id) 
-         VALUES ($1, $2, $3, $4, $5, $6) 
+        "INSERT INTO plans (title, description, category, priority, due_date, is_public, user_id) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7) 
          RETURNING *",
     )
     .bind(body.title)
     .bind(body.description)
     .bind(body.category)
+    .bind(body.priority.unwrap_or(0)) // 默认为 0
     .bind(body.due_date)
     .bind(body.is_public)
-    .bind(user.id) // 绑定所有权
+    .bind(user.id)
     .fetch_one(&state.db)
     .await?;
-
     Ok(Json(plan))
 }
 
@@ -67,10 +67,8 @@ pub async fn update_plan_handler(
     Path(id): Path<i32>,
     user: AuthUser,
     State(state): State<AppState>,
-    Json(body): Json<UpdatePlanSchema>,
+    ValidatedJson(body): ValidatedJson<UpdatePlanSchema>, // 自动校验
 ) -> Result<Json<Plan>, AppError> {
-
-    body.validate()?; 
     // 使用 fetch_optional 来判断更新是否成功（是否找到属于该用户的记录）
     let plan = sqlx::query_as::<_, Plan>(
         "UPDATE plans SET 
@@ -78,23 +76,25 @@ pub async fn update_plan_handler(
             description = COALESCE($2, description),
             status = COALESCE($3, status),
             category = COALESCE($4, category),
-            due_date = COALESCE($5, due_date),
-            is_public = COALESCE($6, is_public),
+            priority = COALESCE($5, priority), -- 新增
+            due_date = COALESCE($6, due_date),
+            is_public = COALESCE($7, is_public),
             updated_at = NOW()
-         WHERE id = $7 AND user_id = $8
+         WHERE id = $8 AND user_id = $9
          RETURNING *",
     )
     .bind(body.title)
     .bind(body.description)
     .bind(body.status)
     .bind(body.category)
-    .bind(body.due_date)
-    .bind(body.is_public)
-    .bind(id)
-    .bind(user.id) // 权限核心：匹配 ID 和 UserID
+    .bind(body.priority) // $5
+    .bind(body.due_date) // $6
+    .bind(body.is_public)// $7
+    .bind(id)            // $8
+    .bind(user.id)       // $9
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("Plan not found or unauthorized".to_string()))?;
+    .ok_or_else(|| AppError::NotFound("...".into()))?;
 
     Ok(Json(plan))
 }
@@ -124,11 +124,8 @@ pub async fn delete_plan_handler(
 // --- 5. 用户注册 ---
 pub async fn register_handler(
     State(state): State<AppState>,
-    Json(payload): Json<RegisterSchema>,
+    ValidatedJson(payload): ValidatedJson<RegisterSchema>, // 自动校验
 ) -> Result<Json<serde_json::Value>, AppError> {
-    // 验证逻辑（简单示例：长度校验）
-    payload.validate()?; // 如果校验失败，直接返回 400 错误
-
     // 1. 哈希密码
     // 修复报错：使用 map_err 将 String 错误转换为 (StatusCode, String)
     let hashed_password =
