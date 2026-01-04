@@ -17,6 +17,7 @@ pub struct User {
 #[derive(Debug, FromRow, Serialize)]
 pub struct Plan {
     pub id: i32,
+    pub user_id: i32, // 新增字段
     pub title: String,
     pub description: Option<String>,
     pub status: String,

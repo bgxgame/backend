@@ -8,7 +8,9 @@ CREATE TABLE users (
 
 CREATE TABLE plans (
     id SERIAL PRIMARY KEY,
-    
+
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, -- 关联用户
+
     -- 核心内容
     title VARCHAR(150) NOT NULL,               -- 计划标题
     description TEXT,                          -- 详细描述 (支持 Markdown 更好)
@@ -30,3 +32,5 @@ CREATE TABLE plans (
     -- 如果是 false，只有登录后可见；如果是 true，游客可见
     is_public BOOLEAN NOT NULL DEFAULT TRUE    
 );
+-- 建议添加索引以提高查询效率
+CREATE INDEX idx_plans_user_id ON plans(user_id);

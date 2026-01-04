@@ -14,10 +14,14 @@ use crate::auth::{hash_password, verify_password, create_jwt, AuthUser}; // 引�
 
 // --- 1. 获取列表 (GET /plans) ---
 pub async fn get_plans_handler(
+    auth: Option<AuthUser>, // 可选认证：登录后能看到自己的私有计划
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Plan>>, (StatusCode, String)> {
+    let user_id = auth.map(|u| u.id).unwrap_or(-1); // 如果没登录，user_id 设为不可能的值
+
     // 查询所有计划，按创建时间倒序
-    let plans = sqlx::query_as::<_, Plan>("SELECT * FROM plans WHERE is_public = 't' ORDER BY created_at DESC")
+    let plans = sqlx::query_as::<_, Plan>("SELECT * FROM plans WHERE is_public = 't' OR user_id = $1  ORDER BY created_at DESC")
+        .bind(user_id)
         .fetch_all(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -27,14 +31,14 @@ pub async fn get_plans_handler(
 
 // --- 2. 创建计划 (POST /plans) ---
 pub async fn create_plan_handler(
-    _user: AuthUser,
+    user: AuthUser, // 强制要求登录
     State(state): State<AppState>,
     Json(body): Json<CreatePlanSchema>,
 ) -> Result<Json<Plan>, (StatusCode, String)> {
     // 插入数据并返回新创建的记录
     let plan = sqlx::query_as::<_, Plan>(
-        "INSERT INTO plans (title, description, category, due_date, is_public) 
-         VALUES ($1, $2, $3, $4, $5) 
+        "INSERT INTO plans (title, description, category, due_date, is_public, user_id) 
+         VALUES ($1, $2, $3, $4, $5, $6) 
          RETURNING *"
     )
     .bind(body.title)
@@ -42,6 +46,7 @@ pub async fn create_plan_handler(
     .bind(body.category)
     .bind(body.due_date)
     .bind(body.is_public)
+    .bind(user.id) // 绑定所有权
     .fetch_one(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -52,7 +57,7 @@ pub async fn create_plan_handler(
 // --- 3. 更新计划 (PATCH /plans/:id) ---
 pub async fn update_plan_handler(
     Path(id): Path<i32>,
-    _user: AuthUser,
+    user: AuthUser,
     State(state): State<AppState>,
     Json(body): Json<UpdatePlanSchema>,
 ) -> Result<Json<Plan>, (StatusCode, String)> {
@@ -73,7 +78,7 @@ pub async fn update_plan_handler(
             due_date = COALESCE($5, due_date),
             is_public = COALESCE($6, is_public),
             updated_at = NOW()
-         WHERE id = $7
+         WHERE id = $7 AND user_id = $8
          RETURNING *"
     )
     .bind(body.title)
@@ -83,6 +88,7 @@ pub async fn update_plan_handler(
     .bind(body.due_date)
     .bind(body.is_public)
     .bind(id)
+    .bind(user.id) // 确保只有所有者能更新
     .fetch_one(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -93,11 +99,12 @@ pub async fn update_plan_handler(
 // --- 4. 删除计划 (DELETE /plans/:id) ---
 pub async fn delete_plan_handler(
     Path(id): Path<i32>,
-    _user: AuthUser,
+    user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let result = sqlx::query("DELETE FROM plans WHERE id = $1")
+    let result = sqlx::query("DELETE FROM plans WHERE id = $1 AND user_id = $2")
         .bind(id)
+        .bind(user.id)
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -157,7 +164,7 @@ pub async fn login_handler(
 
     // 3. 生成 Token
     // 修复报错：使用 map_err 将 String 错误转换为 (StatusCode, String)
-    let token = create_jwt(&user.username)
+    let token = create_jwt(user.id, &user.username)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(AuthResponse {

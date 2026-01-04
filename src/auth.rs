@@ -47,19 +47,21 @@ pub fn verify_password(password: &str, password_hash: &str) -> bool {
 // Token 里的数据结构 (Claims)
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: String, // 用户名 (subject)
-    pub exp: usize,  // 过期时间 (expiration)
+    pub sub: i32,    // 将 sub 改为用户 ID (i32)
+    pub username: String, // 保留用户名用于显示
+    pub exp: usize,
 }
 
 // 创建 Token
-pub fn create_jwt(username: &str) -> Result<String, String> {
+pub fn create_jwt(user_id: i32, username: &str) -> Result<String, String> {
     let expiration = Utc::now()
         .checked_add_signed(Duration::hours(24)) // Token 24小时有效
         .expect("valid timestamp")
         .timestamp();
 
     let claims = Claims {
-        sub: username.to_owned(),
+        sub: user_id,
+        username: username.to_owned(),
         exp: expiration as usize,
     };
 
@@ -78,6 +80,7 @@ pub fn create_jwt(username: &str) -> Result<String, String> {
 // 如果 Token 无效，直接拒绝请求，代码都不会进入 handler。
 
 pub struct AuthUser {
+    pub id: i32,      // 包含 ID
     pub username: String,
 }
 
@@ -106,7 +109,8 @@ where
 
         // 3. 验证通过，返回 AuthUser
         Ok(AuthUser {
-            username: token_data.claims.sub,
+            id: token_data.claims.sub,
+            username: token_data.claims.username,
         })
     }
 }

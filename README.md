@@ -65,3 +65,12 @@
 5. **环境配置**: 通过.env文件管理配置
 
 这是一个功能完整的计划管理后端系统，具备用户认证和计划CRUD功能，适合与前端应用配合使用。
+
+
+### 用户注册
+
+```shell
+curl -X POST http://localhost:3000/api/register \
+  -H "Content-Type: application/json" \
+  -d @register2.json
+```
