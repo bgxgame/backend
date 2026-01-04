@@ -1,0 +1,678 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.env_template
+.gitignore
+Cargo.toml
+data.json
+migrations/20251230160043_init_schema.down.sql
+migrations/20251230160043_init_schema.up.sql
+README.md
+register.json
+src/auth.rs
+src/handlers.rs
+src/main.rs
+src/models.rs
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".env_template">
+# 数据库连接 URL
+DATABASE_URL=postgres://用户名:密码@地址:端口/数据库名
+# 日志级别
+RUST_LOG=debug
+# JWT 密钥
+JWT_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxx
+</file>
+
+<file path="Cargo.toml">
+[package]
+name = "my-life-planner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Web 框架
+axum = "0.7"
+
+# 异步运行时 (Rust 的异步引擎)
+tokio = { version = "1", features = ["full"] }
+
+# 数据库驱动 (PostgreSQL)
+# runtime-tokio: 指定异步运行时
+# tls-native-tls: 处理数据库连接的加密
+sqlx = { version = "0.7", features = ["runtime-tokio", "tls-native-tls", "postgres", "chrono", "uuid"] }
+
+# 序列化/反序列化 (JSON处理)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# 环境变量读取
+dotenvy = "0.15"
+
+#处理数据库中的时间字段
+chrono = { version = "0.4", features = ["serde"] }
+
+# 日志追踪
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+argon2 = "0.5"
+rand_core = { version = "0.6", features = ["std"] }
+jsonwebtoken = "9"
+axum-extra = { version = "0.9", features = ["typed-header"] }
+headers = "0.4"
+
+tower-http = { version = "0.5", features = ["cors"] }
+</file>
+
+<file path="data.json">
+{
+  "title": "学习 Rust",
+  "description": "完成 CRUD 接口开发",
+  "category": "work"
+}
+</file>
+
+<file path="migrations/20251230160043_init_schema.down.sql">
+-- Add down migration script here
+DROP TABLE IF EXISTS plans;
+DROP TABLE IF EXISTS users;
+</file>
+
+<file path="migrations/20251230160043_init_schema.up.sql">
+-- Add up migration script here
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,                     -- 自增主键
+    username VARCHAR(50) NOT NULL UNIQUE,      -- 用户名，必须唯一
+    password_hash VARCHAR(255) NOT NULL,       -- 密码哈希 (严禁明文存储，推荐 Argon2)
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP -- 创建时间
+);
+
+CREATE TABLE plans (
+    id SERIAL PRIMARY KEY,
+    
+    -- 核心内容
+    title VARCHAR(150) NOT NULL,               -- 计划标题
+    description TEXT,                          -- 详细描述 (支持 Markdown 更好)
+    
+    -- 状态管理 (建议前端做枚举映射)
+    -- values: 'pending'(待办), 'in_progress'(进行中), 'completed'(已完成), 'archived'(归档)
+    status VARCHAR(20) NOT NULL DEFAULT 'pending', 
+    
+    -- 分类与优先级
+    category VARCHAR(50) DEFAULT 'life',       -- 例如: 'work', 'life', 'study'
+    priority INTEGER DEFAULT 0,                -- 优先级: 0(普通), 1(重要), 2(紧急)
+    
+    -- 时间管理
+    due_date TIMESTAMP WITH TIME ZONE,         -- 截止日期 (可为空)
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    
+    -- 权限控制
+    -- 如果是 false，只有登录后可见；如果是 true，游客可见
+    is_public BOOLEAN NOT NULL DEFAULT TRUE    
+);
+</file>
+
+<file path="README.md">
+## 项目概述
+
+这是一个名为"My-Life-Planner"（我的生活计划器）的Rust后端项目，基于Axum框架开发，用于管理个人计划和任务。
+
+## 技术栈
+
+- **Web框架**: Axum (Rust)
+- **异步运行时**: Tokio
+- **数据库**: PostgreSQL (通过SQLx)
+- **数据序列化**: Serde/serde_json
+- **密码哈希**: Argon2
+- **JWT认证**: jsonwebtoken
+- **日志追踪**: tracing
+
+## 核心功能
+
+### 1. 用户系统
+- **用户注册**: 创建新用户账号，密码使用Argon2加密存储
+- **用户登录**: 验证用户身份并生成JWT令牌
+
+### 2. 计划管理
+- **创建计划**: 用户可以创建新的计划/任务
+- **获取计划**: 可以获取公开的计划列表
+- **更新计划**: 修改已有的计划信息
+- **删除计划**: 删除指定的计划
+
+### 3. 权限控制
+- **公开/私有**: 计划可以设置为公开或私有
+- **身份验证**: 受保护的API端点需要有效的JWT令牌
+
+## 数据模型
+
+### 用户表 (users)
+- ID (主键)
+- 用户名 (唯一)
+- 密码哈希
+- 创建时间
+
+### 计划表 (plans)
+- ID (主键)
+- 标题
+- 描述
+- 状态 (待办、进行中、已完成、归档)
+- 分类 (工作、生活、学习等)
+- 优先级
+- 截止日期
+- 公开性 (公开/私有)
+- 创建和更新时间
+
+## API端点
+
+- `GET /api/plans` - 获取公开计划列表
+- `POST /api/register` - 用户注册
+- `POST /api/login` - 用户登录
+- `POST /api/plans` - 创建新计划（需认证）
+- `PATCH /api/plans/:id` - 更新计划（需认证）
+- `DELETE /api/plans/:id` - 删除计划（需认证）
+
+## 项目特点
+
+1. **安全性**: 使用Argon2进行密码哈希，JWT进行身份验证
+2. **CORS支持**: 支持跨域请求，便于前端集成
+3. **错误处理**: 完善的错误处理机制
+4. **数据库迁移**: 包含数据库结构的迁移脚本
+5. **环境配置**: 通过.env文件管理配置
+
+这是一个功能完整的计划管理后端系统，具备用户认证和计划CRUD功能，适合与前端应用配合使用。
+</file>
+
+<file path="register.json">
+{ "username": "admin", "password": "mypassword123" }
+</file>
+
+<file path="src/auth.rs">
+// src/auth.rs
+use argon2::{
+    password_hash::{
+        rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString
+    },
+    Argon2,
+};
+use serde::{Deserialize, Serialize};
+use jsonwebtoken::{encode, decode, Header, Algorithm, Validation, EncodingKey, DecodingKey};
+use chrono::{Utc, Duration};
+use axum::{
+    async_trait,
+    extract::FromRequestParts,
+    http::{request::Parts, StatusCode},
+    response::{IntoResponse, Response},
+    Json, RequestPartsExt,
+};
+use axum_extra::{
+    headers::{authorization::Bearer, Authorization},
+    TypedHeader,
+};
+use serde_json::json;
+
+// --- 1. 密码处理 ---
+
+// 加密密码
+pub fn hash_password(password: &str) -> Result<String, String> {
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    let password_hash = argon2.hash_password(password.as_bytes(), &salt)
+        .map_err(|e| e.to_string())?
+        .to_string();
+    Ok(password_hash)
+}
+
+// 验证密码
+pub fn verify_password(password: &str, password_hash: &str) -> bool {
+    let parsed_hash = match PasswordHash::new(password_hash) {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+    Argon2::default().verify_password(password.as_bytes(), &parsed_hash).is_ok()
+}
+
+// --- 2. JWT 处理 ---
+
+// Token 里的数据结构 (Claims)
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Claims {
+    pub sub: String, // 用户名 (subject)
+    pub exp: usize,  // 过期时间 (expiration)
+}
+
+// 创建 Token
+pub fn create_jwt(username: &str) -> Result<String, String> {
+    let expiration = Utc::now()
+        .checked_add_signed(Duration::hours(24)) // Token 24小时有效
+        .expect("valid timestamp")
+        .timestamp();
+
+    let claims = Claims {
+        sub: username.to_owned(),
+        exp: expiration as usize,
+    };
+
+    let secret = std::env::var("JWT_SECRET").expect("JWT_SECRET must be set");
+    
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .map_err(|e| e.to_string())
+}
+
+// --- 3. 核心：认证提取器 (Extractor) ---
+// 这是一个“守门员”。任何在参数里写了 AuthUser 的接口，都会先经过这里。
+// 如果 Token 无效，直接拒绝请求，代码都不会进入 handler。
+
+pub struct AuthUser {
+    pub username: String,
+}
+
+#[async_trait]
+impl<S> FromRequestParts<S> for AuthUser
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, Json<serde_json::Value>);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        // 1. 从 Header 提取 Bearer Token
+        let TypedHeader(Authorization(bearer)) = parts
+            .extract::<TypedHeader<Authorization<Bearer>>>()
+            .await
+            .map_err(|_| (StatusCode::UNAUTHORIZED, Json(json!({"error": "Missing or invalid token"}))))?;
+
+        // 2. 验证 Token
+        let secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "secret".into());
+        let token_data = decode::<Claims>(
+            bearer.token(),
+            &DecodingKey::from_secret(secret.as_bytes()),
+            &Validation::new(Algorithm::HS256),
+        )
+        .map_err(|_| (StatusCode::UNAUTHORIZED, Json(json!({"error": "Invalid token"}))))?;
+
+        // 3. 验证通过，返回 AuthUser
+        Ok(AuthUser {
+            username: token_data.claims.sub,
+        })
+    }
+}
+</file>
+
+<file path="src/handlers.rs">
+// src/handlers.rs
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Json,
+};
+use serde_json::json; // <--- 修复报错：引入 json! 宏
+use crate::models::{
+    CreatePlanSchema, Plan, UpdatePlanSchema, 
+    RegisterSchema, LoginSchema, AuthResponse, User // <--- 确保引入 User
+};
+use crate::AppState;
+use crate::auth::{hash_password, verify_password, create_jwt, AuthUser}; // 引入 AuthUser
+
+// --- 1. 获取列表 (GET /plans) ---
+pub async fn get_plans_handler(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Plan>>, (StatusCode, String)> {
+    // 查询所有计划，按创建时间倒序
+    let plans = sqlx::query_as::<_, Plan>("SELECT * FROM plans WHERE is_public = 't' ORDER BY created_at DESC")
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(plans))
+}
+
+// --- 2. 创建计划 (POST /plans) ---
+pub async fn create_plan_handler(
+    _user: AuthUser,
+    State(state): State<AppState>,
+    Json(body): Json<CreatePlanSchema>,
+) -> Result<Json<Plan>, (StatusCode, String)> {
+    // 插入数据并返回新创建的记录
+    let plan = sqlx::query_as::<_, Plan>(
+        "INSERT INTO plans (title, description, category, due_date, is_public) 
+         VALUES ($1, $2, $3, $4, $5) 
+         RETURNING *"
+    )
+    .bind(body.title)
+    .bind(body.description)
+    .bind(body.category)
+    .bind(body.due_date)
+    .bind(body.is_public)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(plan))
+}
+
+// --- 3. 更新计划 (PATCH /plans/:id) ---
+pub async fn update_plan_handler(
+    Path(id): Path<i32>,
+    _user: AuthUser,
+    State(state): State<AppState>,
+    Json(body): Json<UpdatePlanSchema>,
+) -> Result<Json<Plan>, (StatusCode, String)> {
+    // 检查计划是否存在
+    let _ = sqlx::query_as::<_, Plan>("SELECT * FROM plans WHERE id = $1")
+        .bind(id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, "Plan not found".to_string()))?;
+
+    // 执行更新，使用 COALESCE 函数：如果参数为 NULL，则保持原值不变
+    let plan = sqlx::query_as::<_, Plan>(
+        "UPDATE plans SET 
+            title = COALESCE($1, title),
+            description = COALESCE($2, description),
+            status = COALESCE($3, status),
+            category = COALESCE($4, category),
+            due_date = COALESCE($5, due_date),
+            is_public = COALESCE($6, is_public),
+            updated_at = NOW()
+         WHERE id = $7
+         RETURNING *"
+    )
+    .bind(body.title)
+    .bind(body.description)
+    .bind(body.status)
+    .bind(body.category)
+    .bind(body.due_date)
+    .bind(body.is_public)
+    .bind(id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(plan))
+}
+
+// --- 4. 删除计划 (DELETE /plans/:id) ---
+pub async fn delete_plan_handler(
+    Path(id): Path<i32>,
+    _user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let result = sqlx::query("DELETE FROM plans WHERE id = $1")
+        .bind(id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // 检查是否有行被删除
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "Plan not found".to_string()));
+    }
+
+    Ok(StatusCode::NO_CONTENT) // 204 No Content
+}
+
+// --- 5. 用户注册 ---
+pub async fn register_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<RegisterSchema>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // 1. 哈希密码
+    // 修复报错：使用 map_err 将 String 错误转换为 (StatusCode, String)
+    let hashed_password = hash_password(&payload.password)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?; 
+
+    // 2. 存入数据库
+    let _ = sqlx::query("INSERT INTO users (username, password_hash) VALUES ($1, $2)")
+        .bind(&payload.username)
+        .bind(hashed_password)
+        .execute(&state.db)
+        .await
+        .map_err(|e| {
+            if e.to_string().contains("duplicate key") {
+                (StatusCode::CONFLICT, "Username already exists".to_string())
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            }
+        })?;
+
+    Ok(Json(json!({"message": "User registered successfully"})))
+}
+
+// --- 6. 用户登录 ---
+pub async fn login_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<LoginSchema>,
+) -> Result<Json<AuthResponse>, (StatusCode, String)> {
+    // 1. 查找用户
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = $1")
+        .bind(&payload.username)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::UNAUTHORIZED, "Invalid username or password".to_string()))?;
+
+    // 2. 验证密码
+    if !verify_password(&payload.password, &user.password_hash) {
+        return Err((StatusCode::UNAUTHORIZED, "Invalid username or password".to_string()));
+    }
+
+    // 3. 生成 Token
+    // 修复报错：使用 map_err 将 String 错误转换为 (StatusCode, String)
+    let token = create_jwt(&user.username)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(AuthResponse {
+        token,
+        username: user.username,
+    }))
+}
+</file>
+
+<file path="src/main.rs">
+// src/main.rs
+use axum::{
+    routing::{get, post, patch, delete}, // 引入更多路由方法
+    Router,
+    http::{Method, HeaderValue}, // 引入 Method 和 HeaderValue
+};
+use tower_http::cors::{CorsLayer, Any}; // 引入 CORS 相关
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
+use std::net::SocketAddr;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+// 引入模块
+mod handlers;
+mod models;
+mod auth;
+// 使用 handlers 中的函数
+use handlers::{
+    create_plan_handler, delete_plan_handler, get_plans_handler, update_plan_handler,
+    login_handler, register_handler
+};
+
+#[derive(Clone)]
+pub struct AppState { // 注意加上 pub，因为 handlers 里要用
+    pub db: PgPool,   // 注意加上 pub
+}
+
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "debug".into()))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    dotenvy::dotenv().ok();
+    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
+
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url)
+        .await
+        .expect("Failed to connect to Postgres");
+
+    tracing::info!("✅ 成功连接到数据库!");
+
+    let state = AppState { db: pool };
+
+        // --- CORS 配置 (关键步骤) ---
+    // 允许前端 (http://localhost:5173) 访问后端
+    let cors = CorsLayer::new()
+        // 允许的来源：为了开发方便，这里先设为 Any (允许所有)，
+        // 生产环境建议改为 specific origin: "http://localhost:5173".parse::<HeaderValue>().unwrap()
+        .allow_origin(Any) 
+        // 允许的方法
+        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
+        // 允许的头 (Authorization 等)
+        .allow_headers(Any);
+
+    // 定义路由
+    let app = Router::new()
+        // 公开路由
+        .route("/api/plans", get(get_plans_handler))
+        .route("/api/register", post(register_handler)) // 注册
+        .route("/api/login", post(login_handler))       // 登录
+        // 受保护路由 (在 handlers 内部通过 AuthUser 参数保护，这里路由写法看起来一样)
+        .route("/api/plans", post(create_plan_handler))
+        .route("/api/plans/:id", patch(update_plan_handler))
+        .route("/api/plans/:id", delete(delete_plan_handler))
+        .with_state(state)
+        .layer(cors);
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    tracing::info!("🚀 服务器正在监听: {}", addr);
+
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
+</file>
+
+<file path="src/models.rs">
+// src/models.rs
+use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
+use chrono::{DateTime, Utc};
+
+// --- 1. User 模型 (数据库对应) ---
+#[derive(Debug, FromRow, Deserialize, Serialize)]
+pub struct User {
+    pub id: i32,
+    pub username: String,
+    #[serde(skip)] // 序列化时跳过密码
+    pub password_hash: String,
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+// --- 2. Plan 模型 (数据库对应) ---
+#[derive(Debug, FromRow, Serialize)]
+pub struct Plan {
+    pub id: i32,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub category: Option<String>,
+    pub due_date: Option<DateTime<Utc>>,
+    pub is_public: bool,
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+// --- 3. CRUD 请求结构体 ---
+#[derive(Debug, Deserialize)]
+pub struct CreatePlanSchema {
+    pub title: String,
+    pub description: Option<String>,
+    pub category: Option<String>,
+    pub due_date: Option<DateTime<Utc>>,
+    #[serde(default = "default_is_public")]
+    pub is_public: bool,
+}
+
+fn default_is_public() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdatePlanSchema {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub status: Option<String>,
+    pub category: Option<String>,
+    pub due_date: Option<DateTime<Utc>>,
+    pub is_public: Option<bool>,
+}
+
+// --- 4. 认证相关结构体 ---
+#[derive(Debug, Deserialize)]
+pub struct RegisterSchema {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoginSchema {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthResponse {
+    pub token: String,
+    pub username: String,
+}
+</file>
+
+<file path=".gitignore">
+/target
+.env
+</file>
+
+</files>
