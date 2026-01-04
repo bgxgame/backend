@@ -82,3 +82,10 @@ pub struct AuthResponse {
     pub token: String,
     pub username: String,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct PlanQuery {
+    pub q: Option<String>,      // 搜索关键词
+    pub status: Option<String>, // 状态过滤
+    pub category: Option<String>, // 分类过滤
+}

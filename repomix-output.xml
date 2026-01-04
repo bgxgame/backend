@@ -87,33 +87,6 @@ DROP TABLE IF EXISTS users;
 { "username": "admin", "password": "mypassword123" }
 </file>
 
-<file path="src/validation.rs">
-use ax_extract::FromRequest;
-use axum::{async_trait, extract::FromRequest, Json};
-use validator::Validate;
-use crate::AppError;
-
-pub struct ValidatedJson<T>(pub T);
-
-#[async_trait]
-impl<S, T> FromRequest<S> for ValidatedJson<T>
-where
-    S: Send + Sync,
-    T: Validate + serde::de::DeserializeOwned,
-{
-    type Rejection = AppError;
-
-    async fn from_request(req: axum::http::Request<axum::body::Body>, state: &S) -> Result<Self, Self::Rejection> {
-        let Json(value) = Json::<T>::from_request(req, state).await
-            .map_err(|_| AppError::BadRequest("Invalid JSON".into()))?;
-        
-        value.validate()?; // 自动校验
-        
-        Ok(ValidatedJson(value))
-    }
-}
-</file>
-
 <file path=".gitignore">
 /target
 .env
@@ -162,170 +135,38 @@ CREATE INDEX idx_plans_user_id ON plans(user_id);
 { "username": "brace3", "password": "myp" }
 </file>
 
-<file path="src/error.rs">
-// src/error.rs
+<file path="src/validation.rs">
+// src/validation.rs
 use axum::{
-    http::StatusCode,
-    response::{IntoResponse, Response},
+    async_trait,
+    extract::{FromRequest, Request}, // 修正为 Request
     Json,
 };
-use serde_json::json;
-use thiserror::Error;
+use validator::Validate;
+use crate::AppError;
 
-#[derive(Error, Debug)]
-pub enum AppError {
-    #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
+pub struct ValidatedJson<T>(pub T);
 
-    #[error("Authentication failed: {0}")]
-    Auth(String),
+#[async_trait]
+impl<S, T> FromRequest<S> for ValidatedJson<T>
+where
+    S: Send + Sync,
+    T: Validate + serde::de::DeserializeOwned + 'static, // 增加 'static 约束
+{
+    type Rejection = AppError;
 
-    #[error("Not found: {0}")]
-    NotFound(String),
-
-    #[error("Unauthorized: {0}")]
-    Forbidden(String),
-
-    #[error("Internal server error")]
-    Internal,
-
-    #[error("Validation error: {0}")]
-    BadRequest(String),
-
-    #[error("Validation error: {0}")]
-    ValidationError(#[from] validator::ValidationErrors), // 新增：自动转换校验错误
-}
-
-// 核心逻辑：将我们的错误转换为 HTTP 响应
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        let (status, error_message) = match self {
-            AppError::Database(ref e) => {
-                // 后台记录详细错误
-                tracing::error!("Database Error: {:?}", e);
-
-                // 对外根据具体情况返回信息
-                if e.to_string().contains("duplicate key") {
-                    (StatusCode::CONFLICT, "Record already exists".to_string())
-                } else {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Database operation failed".to_string(),
-                    )
-                }
-            },
-            AppError::Auth(msg) => (StatusCode::UNAUTHORIZED, msg),
-            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
-            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
-            AppError::Internal => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal server error".to_string(),
-            ),
-            AppError::ValidationError(ref e) => {
-                // 将复杂的校验错误对象转为简单易读的字符串或 JSON
-                (StatusCode::BAD_REQUEST, format!("输入参数有误: {}", e))
-            },
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".into())
-        };
-
-        let body = Json(json!({
-            "status": "error",
-            "message": error_message,
-        }));
-
-        (status, body).into_response()
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        // 1. 利用 Axum 原生的 Json 提取器解析 Body
+        // 如果 JSON 格式非法（比如少括号），这里会直接返回 BadRequest
+        let Json(value) = Json::<T>::from_request(req, state).await
+            .map_err(|rejection| AppError::BadRequest(rejection.body_text()))?;
+        
+        // 2. 执行 validator 的校验逻辑
+        // 如果校验失败（比如标题太短），会通过 AppError::ValidationError 自动转换
+        value.validate()?; 
+        
+        Ok(ValidatedJson(value))
     }
-}
-
-// 方便将 String 错误转换为 AppError::Auth
-impl From<String> for AppError {
-    fn from(err: String) -> Self {
-        AppError::Auth(err)
-    }
-}
-</file>
-
-<file path="src/main.rs">
-// src/main.rs
-use axum::{
-    routing::{get, post, patch, delete}, // 引入更多路由方法
-    Router,
-    http::{Method, HeaderValue}, // 引入 Method 和 HeaderValue
-};
-use tower_http::cors::{CorsLayer, Any}; // 引入 CORS 相关
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
-use std::net::SocketAddr;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-// 引入模块
-mod handlers;
-mod models;
-mod auth;
-mod error; // 引入新模块
-pub use error::AppError; // 导出方便其他地方使用
-
-// 使用 handlers 中的函数
-use handlers::{
-    create_plan_handler, delete_plan_handler, get_plans_handler, update_plan_handler,
-    login_handler, register_handler
-};
-
-#[derive(Clone)]
-pub struct AppState { // 注意加上 pub，因为 handlers 里要用
-    pub db: PgPool,   // 注意加上 pub
-}
-
-#[tokio::main]
-async fn main() {
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "debug".into()))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
-    dotenvy::dotenv().ok();
-    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
-
-    let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&db_url)
-        .await
-        .expect("Failed to connect to Postgres");
-
-    tracing::info!("✅ 成功连接到数据库!");
-
-    let state = AppState { db: pool };
-
-        // --- CORS 配置 (关键步骤) ---
-    // 允许前端 (http://localhost:5173) 访问后端
-    let cors = CorsLayer::new()
-        // 允许的来源：为了开发方便，这里先设为 Any (允许所有)，
-        // 生产环境建议改为 specific origin: "http://localhost:5173".parse::<HeaderValue>().unwrap()
-        .allow_origin(Any) 
-        // 允许的方法
-        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
-        // 允许的头 (Authorization 等)
-        .allow_headers(Any);
-
-    // 定义路由
-    let app = Router::new()
-        // 公开路由
-        .route("/api/plans", get(get_plans_handler))
-        .route("/api/register", post(register_handler)) // 注册
-        .route("/api/login", post(login_handler))       // 登录
-        // 受保护路由 (在 handlers 内部通过 AuthUser 参数保护，这里路由写法看起来一样)
-        .route("/api/plans", post(create_plan_handler))
-        .route("/api/plans/:id", patch(update_plan_handler))
-        .route("/api/plans/:id", delete(delete_plan_handler))
-        .with_state(state)
-        .layer(cors);
-
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    tracing::info!("🚀 服务器正在监听: {}", addr);
-
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
 }
 </file>
 
@@ -607,87 +448,159 @@ where
 }
 </file>
 
-<file path="src/models.rs">
-// src/models.rs
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
-use validator::Validate; // 引入 Validate trait
+<file path="src/main.rs">
+// src/main.rs
+use axum::{
+    routing::{get, post, patch, delete}, // 引入更多路由方法
+    Router,
+    http::{Method, HeaderValue}, // 引入 Method 和 HeaderValue
+};
+use tower_http::cors::{CorsLayer, Any}; // 引入 CORS 相关
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
+use std::net::SocketAddr;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-// --- 1. User 模型 (数据库对应) ---
-#[derive(Debug, FromRow, Deserialize, Serialize)]
-pub struct User {
-    pub id: i32,
-    pub username: String,
-    #[serde(skip)] // 序列化时跳过密码
-    pub password_hash: String,
+// 引入模块
+mod handlers;
+mod models;
+mod auth;
+mod error; // 引入新模块
+pub use error::AppError; // 导出方便其他地方使用
+mod validation; // <--- 添加这一行，让编译器知道 validation.rs 的存在
 
-    pub created_at: Option<DateTime<Utc>>,
+// 使用 handlers 中的函数
+use handlers::{
+    create_plan_handler, delete_plan_handler, get_plans_handler, update_plan_handler,
+    login_handler, register_handler
+};
+
+#[derive(Clone)]
+pub struct AppState { // 注意加上 pub，因为 handlers 里要用
+    pub db: PgPool,   // 注意加上 pub
 }
 
-// --- 2. Plan 模型 (数据库对应) ---
-#[derive(Debug, FromRow, Serialize)]
-pub struct Plan {
-    pub id: i32,
-    pub user_id: i32, // 新增字段
-    pub title: String,
-    pub description: Option<String>,
-    pub status: String,
-    pub category: Option<String>,
-    pub due_date: Option<DateTime<Utc>>,
-    pub is_public: bool,
-    pub created_at: Option<DateTime<Utc>>,
-    pub updated_at: Option<DateTime<Utc>>,
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "debug".into()))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    dotenvy::dotenv().ok();
+    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
+
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url)
+        .await
+        .expect("Failed to connect to Postgres");
+
+    tracing::info!("✅ 成功连接到数据库!");
+
+    let state = AppState { db: pool };
+
+        // --- CORS 配置 (关键步骤) ---
+    // 允许前端 (http://localhost:5173) 访问后端
+    let cors = CorsLayer::new()
+        // 允许的来源：为了开发方便，这里先设为 Any (允许所有)，
+        // 生产环境建议改为 specific origin: "http://localhost:5173".parse::<HeaderValue>().unwrap()
+        .allow_origin(Any) 
+        // 允许的方法
+        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
+        // 允许的头 (Authorization 等)
+        .allow_headers(Any);
+
+    // 定义路由
+    let app = Router::new()
+        // 公开路由
+        .route("/api/plans", get(get_plans_handler))
+        .route("/api/register", post(register_handler)) // 注册
+        .route("/api/login", post(login_handler))       // 登录
+        // 受保护路由 (在 handlers 内部通过 AuthUser 参数保护，这里路由写法看起来一样)
+        .route("/api/plans", post(create_plan_handler))
+        .route("/api/plans/:id", patch(update_plan_handler))
+        .route("/api/plans/:id", delete(delete_plan_handler))
+        .with_state(state)
+        .layer(cors);
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    tracing::info!("🚀 服务器正在监听: {}", addr);
+
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
+</file>
+
+<file path="src/error.rs">
+// src/error.rs
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
+use serde_json::{json, Value};
+use thiserror::Error;
+use validator::ValidationErrors;
+
+#[derive(Error, Debug)]
+pub enum AppError {
+    #[error("Database error")]
+    Database(#[from] sqlx::Error),
+
+    #[error("Authentication failed: {0}")]
+    Auth(String),
+
+    #[error("Not found")]
+    NotFound(String),
+
+    #[error("Internal server error")]
+    Internal,
+
+    #[error("Validation error")]
+    ValidationError(#[from] ValidationErrors),
+
+    #[error("Bad request: {0}")]
+    BadRequest(String),
 }
 
-// --- 3. CRUD 请求结构体 ---
-#[derive(Debug, Deserialize, Validate)]
-pub struct CreatePlanSchema {
-    #[validate(length(min = 1, max = 150, message = "标题不能为空且不能超过 150 字"))]
-    pub title: String,
-    #[validate(length(min = 10, max = 150, message = "描述至少10个字且不能超过 150 字"))]
-    pub description: Option<String>,
-    #[validate(length(max = 50, message = "分类名称过长"))]
-    pub category: Option<String>,
-    pub due_date: Option<DateTime<Utc>>,
-    #[serde(default = "default_is_public")]
-    pub is_public: bool,
-}
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        let (status, message, details) = match self {
+            AppError::Database(ref e) => {
+                tracing::error!("DB Error: {:?}", e);
+                if e.to_string().contains("duplicate key") {
+                    (StatusCode::CONFLICT, "记录已存在".to_string(), None)
+                } else {
+                    (StatusCode::INTERNAL_SERVER_ERROR, "数据库操作失败".to_string(), None)
+                }
+            }
+            AppError::Auth(msg) => (StatusCode::UNAUTHORIZED, msg, None),
+            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg, None),
+            AppError::ValidationError(e) => {
+                // 将 validator 的错误提取为 field -> message 的 Map
+                let mut errors = std::collections::HashMap::new();
+                for (field, field_errors) in e.field_errors() {
+                    let msgs: Vec<String> = field_errors
+                        .iter()
+                        .map(|fe| fe.message.as_ref().map(|m| m.to_string()).unwrap_or_else(|| "格式不正确".to_string()))
+                        .collect();
+                    errors.insert(field, msgs);
+                }
+                (StatusCode::BAD_REQUEST, "输入校验失败".to_string(), Some(json!(errors)))
+            }
+            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg, None),
+            AppError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "服务器内部错误".to_string(), None),
+        };
 
-fn default_is_public() -> bool {
-    true
-}
+        let body = Json(json!({
+            "status": "error",
+            "message": message,
+            "errors": details // 这里的具体错误字段供前端解析
+        }));
 
-#[derive(Debug, Deserialize, Validate)]
-pub struct UpdatePlanSchema {
-    #[validate(length(min = 1, max = 150, message = "标题不能为空"))]
-    pub title: Option<String>,
-    pub description: Option<String>,
-    pub status: Option<String>,
-    pub category: Option<String>,
-    pub due_date: Option<DateTime<Utc>>,
-    pub is_public: Option<bool>,
-}
-
-// --- 4. 认证相关结构体 ---
-#[derive(Debug, Deserialize, Validate)]
-pub struct RegisterSchema {
-    #[validate(length(min = 3, max = 20, message = "用户名长度需在 3-20 位之间"))]
-    pub username: String,
-    #[validate(length(min = 6, message = "密码至少需要 6 位"))]
-    pub password: String,
-}
-
-#[derive(Debug, Deserialize, Validate)]
-pub struct LoginSchema {
-    pub username: String,
-    pub password: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AuthResponse {
-    pub token: String,
-    pub username: String,
+        (status, body).into_response()
+    }
 }
 </file>
 
@@ -711,7 +624,7 @@ use axum::{
     Json,
 };
 use serde_json::json; // <--- 修复报错：引入 json! 宏 // 引入自定义错误
-use validator::Validate; 
+use crate::validation::ValidatedJson; // 引入我们的提取器
 
 // --- 1. 获取列表 (GET /plans) ---
 pub async fn get_plans_handler(
@@ -735,24 +648,24 @@ pub async fn get_plans_handler(
 pub async fn create_plan_handler(
     user: AuthUser, // 强制要求登录
     State(state): State<AppState>,
-    Json(body): Json<CreatePlanSchema>,
+    ValidatedJson(body): ValidatedJson<CreatePlanSchema>, // 这里的 ValidatedJson 会自动校验
 ) -> Result<Json<Plan>, AppError> {
 
-    // 插入数据并返回新创建的记录
+    // 插入数据 
     let plan = sqlx::query_as::<_, Plan>(
-        "INSERT INTO plans (title, description, category, due_date, is_public, user_id) 
-         VALUES ($1, $2, $3, $4, $5, $6) 
+        "INSERT INTO plans (title, description, category, priority, due_date, is_public, user_id) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7) 
          RETURNING *",
     )
     .bind(body.title)
     .bind(body.description)
     .bind(body.category)
+    .bind(body.priority.unwrap_or(0)) // 默认为 0
     .bind(body.due_date)
     .bind(body.is_public)
-    .bind(user.id) // 绑定所有权
+    .bind(user.id)
     .fetch_one(&state.db)
     .await?;
-
     Ok(Json(plan))
 }
 
@@ -761,10 +674,8 @@ pub async fn update_plan_handler(
     Path(id): Path<i32>,
     user: AuthUser,
     State(state): State<AppState>,
-    Json(body): Json<UpdatePlanSchema>,
+    ValidatedJson(body): ValidatedJson<UpdatePlanSchema>, // 自动校验
 ) -> Result<Json<Plan>, AppError> {
-
-    body.validate()?; 
     // 使用 fetch_optional 来判断更新是否成功（是否找到属于该用户的记录）
     let plan = sqlx::query_as::<_, Plan>(
         "UPDATE plans SET 
@@ -772,23 +683,25 @@ pub async fn update_plan_handler(
             description = COALESCE($2, description),
             status = COALESCE($3, status),
             category = COALESCE($4, category),
-            due_date = COALESCE($5, due_date),
-            is_public = COALESCE($6, is_public),
+            priority = COALESCE($5, priority), -- 新增
+            due_date = COALESCE($6, due_date),
+            is_public = COALESCE($7, is_public),
             updated_at = NOW()
-         WHERE id = $7 AND user_id = $8
+         WHERE id = $8 AND user_id = $9
          RETURNING *",
     )
     .bind(body.title)
     .bind(body.description)
     .bind(body.status)
     .bind(body.category)
-    .bind(body.due_date)
-    .bind(body.is_public)
-    .bind(id)
-    .bind(user.id) // 权限核心：匹配 ID 和 UserID
+    .bind(body.priority) // $5
+    .bind(body.due_date) // $6
+    .bind(body.is_public)// $7
+    .bind(id)            // $8
+    .bind(user.id)       // $9
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("Plan not found or unauthorized".to_string()))?;
+    .ok_or_else(|| AppError::NotFound("...".into()))?;
 
     Ok(Json(plan))
 }
@@ -818,11 +731,8 @@ pub async fn delete_plan_handler(
 // --- 5. 用户注册 ---
 pub async fn register_handler(
     State(state): State<AppState>,
-    Json(payload): Json<RegisterSchema>,
+    ValidatedJson(payload): ValidatedJson<RegisterSchema>, // 自动校验
 ) -> Result<Json<serde_json::Value>, AppError> {
-    // 验证逻辑（简单示例：长度校验）
-    payload.validate()?; // 如果校验失败，直接返回 400 错误
-
     // 1. 哈希密码
     // 修复报错：使用 map_err 将 String 错误转换为 (StatusCode, String)
     let hashed_password =
@@ -864,6 +774,93 @@ pub async fn login_handler(
         token,
         username: user.username,
     }))
+}
+</file>
+
+<file path="src/models.rs">
+// src/models.rs
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
+use validator::Validate; // 引入 Validate trait
+
+// --- 1. User 模型 (数据库对应) ---
+#[derive(Debug, FromRow, Deserialize, Serialize)]
+pub struct User {
+    pub id: i32,
+    pub username: String,
+    #[serde(skip)] // 序列化时跳过密码
+    pub password_hash: String,
+
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+// --- 2. Plan 模型 (数据库对应) ---
+#[derive(Debug, FromRow, Serialize)]
+pub struct Plan {
+    pub id: i32,
+    pub user_id: i32, // 新增字段
+    pub title: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub category: Option<String>,
+    pub priority: i32,
+    pub due_date: Option<DateTime<Utc>>,
+    pub is_public: bool,
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+// --- 3. CRUD 请求结构体 ---
+#[derive(Debug, Deserialize, Validate)]
+pub struct CreatePlanSchema {
+    #[validate(length(min = 1, max = 150, message = "标题不能为空且不能超过 150 字"))]
+    pub title: String,
+    #[validate(length(min = 5, message = "描述内容太短了，再多写点吧"))]
+    pub description: Option<String>,
+    #[validate(length(max = 50, message = "分类名称过长"))]
+    pub category: Option<String>,
+    pub priority: Option<i32>,
+    pub due_date: Option<DateTime<Utc>>,
+    #[serde(default = "default_is_public")]
+    pub is_public: bool,
+}
+
+fn default_is_public() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct UpdatePlanSchema {
+    #[validate(length(min = 1, max = 150, message = "标题不能为空"))]
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub status: Option<String>,
+    pub category: Option<String>,
+    pub priority: Option<i32>,
+    pub due_date: Option<DateTime<Utc>>,
+    pub is_public: Option<bool>,
+}
+
+// --- 4. 认证相关结构体 ---
+#[derive(Debug, Deserialize, Validate)]
+pub struct RegisterSchema {
+    #[validate(length(min = 3, max = 20, message = "用户名长度需在 3-20 位之间"))]
+    pub username: String,
+    #[validate(length(min = 6, message = "密码至少需要 6 位"))]
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct LoginSchema {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthResponse {
+    pub token: String,
+    pub username: String,
 }
 </file>
 

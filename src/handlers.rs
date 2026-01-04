@@ -18,21 +18,36 @@ use axum::{
 };
 use serde_json::json; // <--- 修复报错：引入 json! 宏 // 引入自定义错误
 use crate::validation::ValidatedJson; // 引入我们的提取器
+use axum::extract::Query; // 引入 Query 提取器
+use crate::models::PlanQuery; // 引入刚才定义的结构体
 
 // --- 1. 获取列表 (GET /plans) ---
 pub async fn get_plans_handler(
     auth: Option<AuthUser>, // 可选认证：登录后能看到自己的私有计划
+    Query(query): Query<PlanQuery>, // 获取 URL 参数，例如 ?q=rust&status=pending
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Plan>>, AppError> {
     let user_id = auth.map(|u| u.id).unwrap_or(-1); // 如果没登录，user_id 设为不可能的值
 
-    // 查询所有计划，按创建时间倒序
+    // 构建动态查询 SQL
+    // ILIKE 是 PostgreSQL 的不区分大小写模糊查询
     let plans = sqlx::query_as::<_, Plan>(
-        "SELECT * FROM plans WHERE is_public = 't' OR user_id = $1  ORDER BY created_at DESC",
+        r#"
+        SELECT * FROM plans 
+        WHERE (is_public = 't' OR user_id = $1)
+          AND ($2 IS NULL OR title ILIKE $2 OR description ILIKE $2)
+          AND ($3 IS NULL OR status = $3)
+          AND ($4 IS NULL OR category = $4)
+        ORDER BY created_at DESC
+        "#,
     )
     .bind(user_id)
+    .bind(query.q.map(|s| format!("%{}%", s))) // 包装成 SQL 模糊匹配格式 %key%
+    .bind(query.status)
+    .bind(query.category)
     .fetch_all(&state.db)
     .await?;
+
 
     Ok(Json(plans))
 }
