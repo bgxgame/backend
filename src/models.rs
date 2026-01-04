@@ -36,7 +36,7 @@ pub struct Plan {
 pub struct CreatePlanSchema {
     #[validate(length(min = 1, max = 150, message = "标题不能为空且不能超过 150 字"))]
     pub title: String,
-    #[validate(length(min = 5, message = "描述内容太短了，再多写点吧"))]
+    #[validate(length(min = 5, message = "描述内容至少需要 5 个字"))]
     pub description: Option<String>,
     #[validate(length(max = 50, message = "分类名称过长"))]
     pub category: Option<String>,
@@ -52,8 +52,11 @@ fn default_is_public() -> bool {
 
 #[derive(Debug, Deserialize, Validate)]
 pub struct UpdatePlanSchema {
-    #[validate(length(min = 1, max = 150, message = "标题不能为空"))]
+    // 更新时，如果传了标题，则必须满足长度
+    #[validate(length(min = 2, max = 150, message = "标题至少需要 2 个字"))]
     pub title: Option<String>,
+    // 修复点：增加描述校验，确保更新时如果修改了描述，长度也要够
+    #[validate(length(min = 5, message = "描述内容太短了，至少 5 个字"))]
     pub description: Option<String>,
     pub status: Option<String>,
     pub category: Option<String>,
@@ -85,7 +88,7 @@ pub struct AuthResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct PlanQuery {
-    pub q: Option<String>,      // 搜索关键词
-    pub status: Option<String>, // 状态过滤
+    pub q: Option<String>,        // 搜索关键词
+    pub status: Option<String>,   // 状态过滤
     pub category: Option<String>, // 分类过滤
 }
