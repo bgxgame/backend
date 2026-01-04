@@ -36,7 +36,7 @@ pub struct Plan {
 pub struct CreatePlanSchema {
     #[validate(length(min = 1, max = 150, message = "标题不能为空且不能超过 150 字"))]
     pub title: String,
-    #[validate(length(min = 10, max = 150, message = "描述至少10个字且不能超过 150 字"))]
+    #[validate(length(min = 5, message = "描述内容太短了，再多写点吧"))]
     pub description: Option<String>,
     #[validate(length(max = 50, message = "分类名称过长"))]
     pub category: Option<String>,

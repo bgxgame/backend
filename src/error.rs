@@ -4,77 +4,66 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use thiserror::Error;
+use validator::ValidationErrors;
 
 #[derive(Error, Debug)]
 pub enum AppError {
-    #[error("Database error: {0}")]
+    #[error("Database error")]
     Database(#[from] sqlx::Error),
 
     #[error("Authentication failed: {0}")]
     Auth(String),
 
-    #[error("Not found: {0}")]
+    #[error("Not found")]
     NotFound(String),
-
-    #[error("Unauthorized: {0}")]
-    Forbidden(String),
 
     #[error("Internal server error")]
     Internal,
 
-    #[error("Validation error: {0}")]
-    BadRequest(String),
+    #[error("Validation error")]
+    ValidationError(#[from] ValidationErrors),
 
-    #[error("Validation error: {0}")]
-    ValidationError(#[from] validator::ValidationErrors), // 新增：自动转换校验错误
+    #[error("Bad request: {0}")]
+    BadRequest(String),
 }
 
-// 核心逻辑：将我们的错误转换为 HTTP 响应
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, error_message) = match self {
+        let (status, message, details) = match self {
             AppError::Database(ref e) => {
-                // 后台记录详细错误
-                tracing::error!("Database Error: {:?}", e);
-
-                // 对外根据具体情况返回信息
+                tracing::error!("DB Error: {:?}", e);
                 if e.to_string().contains("duplicate key") {
-                    (StatusCode::CONFLICT, "Record already exists".to_string())
+                    (StatusCode::CONFLICT, "记录已存在".to_string(), None)
                 } else {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "Database operation failed".to_string(),
-                    )
+                    (StatusCode::INTERNAL_SERVER_ERROR, "数据库操作失败".to_string(), None)
                 }
-            },
-            AppError::Auth(msg) => (StatusCode::UNAUTHORIZED, msg),
-            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
-            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
-            AppError::Internal => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal server error".to_string(),
-            ),
-            AppError::ValidationError(ref e) => {
-                // 将复杂的校验错误对象转为简单易读的字符串或 JSON
-                (StatusCode::BAD_REQUEST, format!("输入参数有误: {}", e))
-            },
+            }
+            AppError::Auth(msg) => (StatusCode::UNAUTHORIZED, msg, None),
+            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg, None),
+            AppError::ValidationError(e) => {
+                // 将 validator 的错误提取为 field -> message 的 Map
+                let mut errors = std::collections::HashMap::new();
+                for (field, field_errors) in e.field_errors() {
+                    let msgs: Vec<String> = field_errors
+                        .iter()
+                        .map(|fe| fe.message.as_ref().map(|m| m.to_string()).unwrap_or_else(|| "格式不正确".to_string()))
+                        .collect();
+                    errors.insert(field, msgs);
+                }
+                (StatusCode::BAD_REQUEST, "输入校验失败".to_string(), Some(json!(errors)))
+            }
+            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg, None),
+            AppError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "服务器内部错误".to_string(), None),
         };
 
         let body = Json(json!({
             "status": "error",
-            "message": error_message,
+            "message": message,
+            "errors": details // 这里的具体错误字段供前端解析
         }));
 
         (status, body).into_response()
-    }
-}
-
-// 方便将 String 错误转换为 AppError::Auth
-impl From<String> for AppError {
-    fn from(err: String) -> Self {
-        AppError::Auth(err)
     }
 }
