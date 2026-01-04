@@ -26,6 +26,9 @@ pub enum AppError {
 
     #[error("Validation error: {0}")]
     BadRequest(String),
+
+    #[error("Validation error: {0}")]
+    ValidationError(#[from] validator::ValidationErrors), // 新增：自动转换校验错误
 }
 
 // 核心逻辑：将我们的错误转换为 HTTP 响应
@@ -35,19 +38,30 @@ impl IntoResponse for AppError {
             AppError::Database(ref e) => {
                 // 后台记录详细错误
                 tracing::error!("Database Error: {:?}", e);
-                
+
                 // 对外根据具体情况返回信息
                 if e.to_string().contains("duplicate key") {
                     (StatusCode::CONFLICT, "Record already exists".to_string())
                 } else {
-                    (StatusCode::INTERNAL_SERVER_ERROR, "Database operation failed".to_string())
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Database operation failed".to_string(),
+                    )
                 }
-            }
+            },
             AppError::Auth(msg) => (StatusCode::UNAUTHORIZED, msg),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
-            AppError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string()),
+            AppError::Internal => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            ),
+            AppError::ValidationError(ref e) => {
+                // 将复杂的校验错误对象转为简单易读的字符串或 JSON
+                (StatusCode::BAD_REQUEST, format!("输入参数有误: {}", e))
+            },
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".into())
         };
 
         let body = Json(json!({

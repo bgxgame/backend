@@ -17,6 +17,7 @@ use axum::{
     Json,
 };
 use serde_json::json; // <--- 修复报错：引入 json! 宏 // 引入自定义错误
+use validator::Validate; 
 
 // --- 1. 获取列表 (GET /plans) ---
 pub async fn get_plans_handler(
@@ -42,6 +43,7 @@ pub async fn create_plan_handler(
     State(state): State<AppState>,
     Json(body): Json<CreatePlanSchema>,
 ) -> Result<Json<Plan>, AppError> {
+
     // 插入数据并返回新创建的记录
     let plan = sqlx::query_as::<_, Plan>(
         "INSERT INTO plans (title, description, category, due_date, is_public, user_id) 
@@ -67,6 +69,8 @@ pub async fn update_plan_handler(
     State(state): State<AppState>,
     Json(body): Json<UpdatePlanSchema>,
 ) -> Result<Json<Plan>, AppError> {
+
+    body.validate()?; 
     // 使用 fetch_optional 来判断更新是否成功（是否找到属于该用户的记录）
     let plan = sqlx::query_as::<_, Plan>(
         "UPDATE plans SET 
@@ -123,9 +127,7 @@ pub async fn register_handler(
     Json(payload): Json<RegisterSchema>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     // 验证逻辑（简单示例：长度校验）
-    if payload.password.len() < 6 {
-        return Err(AppError::BadRequest("Password too short".into()));
-    }
+    payload.validate()?; // 如果校验失败，直接返回 400 错误
 
     // 1. 哈希密码
     // 修复报错：使用 map_err 将 String 错误转换为 (StatusCode, String)

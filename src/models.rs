@@ -1,7 +1,8 @@
 // src/models.rs
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
-use chrono::{DateTime, Utc};
+use validator::Validate; // 引入 Validate trait
 
 // --- 1. User 模型 (数据库对应) ---
 #[derive(Debug, FromRow, Deserialize, Serialize)]
@@ -10,6 +11,7 @@ pub struct User {
     pub username: String,
     #[serde(skip)] // 序列化时跳过密码
     pub password_hash: String,
+
     pub created_at: Option<DateTime<Utc>>,
 }
 
@@ -29,10 +31,13 @@ pub struct Plan {
 }
 
 // --- 3. CRUD 请求结构体 ---
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Validate)]
 pub struct CreatePlanSchema {
+    #[validate(length(min = 1, max = 150, message = "标题不能为空且不能超过 150 字"))]
     pub title: String,
+    #[validate(length(min = 10, max = 150, message = "描述至少10个字且不能超过 150 字"))]
     pub description: Option<String>,
+    #[validate(length(max = 50, message = "分类名称过长"))]
     pub category: Option<String>,
     pub due_date: Option<DateTime<Utc>>,
     #[serde(default = "default_is_public")]
@@ -43,8 +48,9 @@ fn default_is_public() -> bool {
     true
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Validate)]
 pub struct UpdatePlanSchema {
+    #[validate(length(min = 1, max = 150, message = "标题不能为空"))]
     pub title: Option<String>,
     pub description: Option<String>,
     pub status: Option<String>,
@@ -54,13 +60,15 @@ pub struct UpdatePlanSchema {
 }
 
 // --- 4. 认证相关结构体 ---
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Validate)]
 pub struct RegisterSchema {
+    #[validate(length(min = 3, max = 20, message = "用户名长度需在 3-20 位之间"))]
     pub username: String,
+    #[validate(length(min = 6, message = "密码至少需要 6 位"))]
     pub password: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Validate)]
 pub struct LoginSchema {
     pub username: String,
     pub password: String,

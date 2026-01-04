@@ -38,3 +38,5 @@ headers = "0.4"
 tower-http = { version = "0.5", features = ["cors"] }
 
 thiserror = "1.0"
+
+validator = { version = "0.19", features = ["derive"] }
