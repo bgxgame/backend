@@ -4,7 +4,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde_json::{json, Value};
+use serde_json::json;
 use thiserror::Error;
 use validator::ValidationErrors;
 
@@ -18,6 +18,10 @@ pub enum AppError {
 
     #[error("Not found")]
     NotFound(String),
+
+    // --- 新增：处理权限不足 (403) ---
+    #[error("Forbidden: {0}")]
+    Forbidden(String),
 
     #[error("Internal server error")]
     Internal,
@@ -46,8 +50,11 @@ impl IntoResponse for AppError {
             }
             AppError::Auth(msg) => (StatusCode::UNAUTHORIZED, msg, None),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg, None),
+            
+            // --- 映射 Forbidden 到 403 ---
+            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg, None),
+
             AppError::ValidationError(e) => {
-                // 将 validator 的错误提取为 field -> message 的 Map
                 let mut errors = std::collections::HashMap::new();
                 for (field, field_errors) in e.field_errors() {
                     let msgs: Vec<String> = field_errors
@@ -78,7 +85,7 @@ impl IntoResponse for AppError {
         let body = Json(json!({
             "status": "error",
             "message": message,
-            "errors": details // 这里的具体错误字段供前端解析
+            "errors": details
         }));
 
         (status, body).into_response()

@@ -11,19 +11,17 @@ use chrono::{Utc, Duration};
 use axum::{
     async_trait,
     extract::FromRequestParts,
-    http::{request::Parts, StatusCode},
-    response::{IntoResponse, Response},
-    Json, RequestPartsExt,
+    http::request::Parts,
+    RequestPartsExt,
 };
 use axum_extra::{
     headers::{authorization::Bearer, Authorization},
     TypedHeader,
 };
-use serde_json::json;
-use crate::AppError; // 引入自定义错误
+use crate::AppError; 
+
 // --- 1. 密码处理 ---
 
-// 加密密码
 pub fn hash_password(password: &str) -> Result<String, String> {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
@@ -33,7 +31,6 @@ pub fn hash_password(password: &str) -> Result<String, String> {
     Ok(password_hash)
 }
 
-// 验证密码
 pub fn verify_password(password: &str, password_hash: &str) -> bool {
     let parsed_hash = match PasswordHash::new(password_hash) {
         Ok(h) => h,
@@ -44,18 +41,16 @@ pub fn verify_password(password: &str, password_hash: &str) -> bool {
 
 // --- 2. JWT 处理 ---
 
-// Token 里的数据结构 (Claims)
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: i32,    // 将 sub 改为用户 ID (i32)
-    pub username: String, // 保留用户名用于显示
+    pub sub: i32,    
+    pub username: String, 
     pub exp: usize,
 }
 
-// 创建 Token
 pub fn create_jwt(user_id: i32, username: &str) -> Result<String, String> {
     let expiration = Utc::now()
-        .checked_add_signed(Duration::hours(24)) // Token 24小时有效
+        .checked_add_signed(Duration::hours(24)) 
         .expect("valid timestamp")
         .timestamp();
 
@@ -76,11 +71,12 @@ pub fn create_jwt(user_id: i32, username: &str) -> Result<String, String> {
 }
 
 // --- 3. 核心：认证提取器 (Extractor) ---
-// 这是一个“守门员”。任何在参数里写了 AuthUser 的接口，都会先经过这里。
-// 如果 Token 无效，直接拒绝请求，代码都不会进入 handler。
 
 pub struct AuthUser {
-    pub id: i32,      // 包含 ID
+    pub id: i32,
+    // 如果后续不需要在后端逻辑里读取用户名，可以暂时去掉它
+    // 或者加上 #[allow(dead_code)] 告诉编译器这是故意的
+    #[allow(dead_code)] 
     pub username: String,
 }
 

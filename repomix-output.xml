@@ -572,7 +572,11 @@ impl IntoResponse for AppError {
                 if e.to_string().contains("duplicate key") {
                     (StatusCode::CONFLICT, "记录已存在".to_string(), None)
                 } else {
-                    (StatusCode::INTERNAL_SERVER_ERROR, "数据库操作失败".to_string(), None)
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "数据库操作失败".to_string(),
+                        None,
+                    )
                 }
             }
             AppError::Auth(msg) => (StatusCode::UNAUTHORIZED, msg, None),
@@ -583,14 +587,27 @@ impl IntoResponse for AppError {
                 for (field, field_errors) in e.field_errors() {
                     let msgs: Vec<String> = field_errors
                         .iter()
-                        .map(|fe| fe.message.as_ref().map(|m| m.to_string()).unwrap_or_else(|| "格式不正确".to_string()))
+                        .map(|fe| {
+                            fe.message
+                                .as_ref()
+                                .map(|m| m.to_string())
+                                .unwrap_or_else(|| "格式不正确".to_string())
+                        })
                         .collect();
                     errors.insert(field, msgs);
                 }
-                (StatusCode::BAD_REQUEST, "输入校验失败".to_string(), Some(json!(errors)))
+                (
+                    StatusCode::BAD_REQUEST,
+                    "输入校验失败".to_string(),
+                    Some(json!(errors)),
+                )
             }
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg, None),
-            AppError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "服务器内部错误".to_string(), None),
+            AppError::Internal => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "服务器内部错误".to_string(),
+                None,
+            ),
         };
 
         let body = Json(json!({
@@ -625,21 +642,36 @@ use axum::{
 };
 use serde_json::json; // <--- 修复报错：引入 json! 宏 // 引入自定义错误
 use crate::validation::ValidatedJson; // 引入我们的提取器
+use axum::extract::Query; // 引入 Query 提取器
+use crate::models::PlanQuery; // 引入刚才定义的结构体
 
 // --- 1. 获取列表 (GET /plans) ---
 pub async fn get_plans_handler(
     auth: Option<AuthUser>, // 可选认证：登录后能看到自己的私有计划
+    Query(query): Query<PlanQuery>, // 获取 URL 参数，例如 ?q=rust&status=pending
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Plan>>, AppError> {
     let user_id = auth.map(|u| u.id).unwrap_or(-1); // 如果没登录，user_id 设为不可能的值
 
-    // 查询所有计划，按创建时间倒序
+    // 构建动态查询 SQL
+    // ILIKE 是 PostgreSQL 的不区分大小写模糊查询
     let plans = sqlx::query_as::<_, Plan>(
-        "SELECT * FROM plans WHERE is_public = 't' OR user_id = $1  ORDER BY created_at DESC",
+        r#"
+        SELECT * FROM plans 
+        WHERE (is_public = 't' OR user_id = $1)
+          AND ($2 IS NULL OR title ILIKE $2 OR description ILIKE $2)
+          AND ($3 IS NULL OR status = $3)
+          AND ($4 IS NULL OR category = $4)
+        ORDER BY created_at DESC
+        "#,
     )
     .bind(user_id)
+    .bind(query.q.map(|s| format!("%{}%", s))) // 包装成 SQL 模糊匹配格式 %key%
+    .bind(query.status)
+    .bind(query.category)
     .fetch_all(&state.db)
     .await?;
+
 
     Ok(Json(plans))
 }
@@ -816,7 +848,7 @@ pub struct Plan {
 pub struct CreatePlanSchema {
     #[validate(length(min = 1, max = 150, message = "标题不能为空且不能超过 150 字"))]
     pub title: String,
-    #[validate(length(min = 5, message = "描述内容太短了，再多写点吧"))]
+    #[validate(length(min = 5, message = "描述内容至少需要 5 个字"))]
     pub description: Option<String>,
     #[validate(length(max = 50, message = "分类名称过长"))]
     pub category: Option<String>,
@@ -832,8 +864,11 @@ fn default_is_public() -> bool {
 
 #[derive(Debug, Deserialize, Validate)]
 pub struct UpdatePlanSchema {
-    #[validate(length(min = 1, max = 150, message = "标题不能为空"))]
+    // 更新时，如果传了标题，则必须满足长度
+    #[validate(length(min = 2, max = 150, message = "标题至少需要 2 个字"))]
     pub title: Option<String>,
+    // 修复点：增加描述校验，确保更新时如果修改了描述，长度也要够
+    #[validate(length(min = 5, message = "描述内容太短了，至少 5 个字"))]
     pub description: Option<String>,
     pub status: Option<String>,
     pub category: Option<String>,
@@ -861,6 +896,13 @@ pub struct LoginSchema {
 pub struct AuthResponse {
     pub token: String,
     pub username: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PlanQuery {
+    pub q: Option<String>,        // 搜索关键词
+    pub status: Option<String>,   // 状态过滤
+    pub category: Option<String>, // 分类过滤
 }
 </file>
 
