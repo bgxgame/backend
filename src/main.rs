@@ -57,6 +57,7 @@ async fn main() {
         // 认证
         .route("/api/register", post(register_handler))
         .route("/api/login", post(login_handler))
+        .route("/api/refresh", post(refresh_handler))
         // 项目路由
         .route("/api/projects", get(get_projects_handler))
         .route("/api/projects", post(create_project_handler))

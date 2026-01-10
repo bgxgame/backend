@@ -19,8 +19,9 @@ use axum_extra::{
     TypedHeader,
 };
 use crate::AppError; 
+use uuid::Uuid;
 
-// --- 1. 密码处理 ---
+// --- 1. 密码处理 (Argon2) ---
 
 pub fn hash_password(password: &str) -> Result<String, String> {
     let salt = SaltString::generate(&mut OsRng);
@@ -39,18 +40,20 @@ pub fn verify_password(password: &str, password_hash: &str) -> bool {
     Argon2::default().verify_password(password.as_bytes(), &parsed_hash).is_ok()
 }
 
-// --- 2. JWT 处理 ---
+// --- 2. JWT (Access Token) 处理 ---
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: i32,    
+    pub sub: i32,         // 用户 ID
     pub username: String, 
-    pub exp: usize,
+    pub exp: usize,       // 过期时间
 }
 
+/// 生成短效的 Access Token (用于 API 请求)
+/// 建议有效期：15 分钟
 pub fn create_jwt(user_id: i32, username: &str) -> Result<String, String> {
     let expiration = Utc::now()
-        .checked_add_signed(Duration::hours(24)) 
+        .checked_add_signed(Duration::minutes(15)) 
         .expect("valid timestamp")
         .timestamp();
 
@@ -70,12 +73,18 @@ pub fn create_jwt(user_id: i32, username: &str) -> Result<String, String> {
     .map_err(|e| e.to_string())
 }
 
-// --- 3. 核心：认证提取器 (Extractor) ---
+// --- 3. Refresh Token 处理 ---
+
+/// 生成唯一的随机字符串作为刷新令牌
+pub fn generate_refresh_token() -> String {
+    Uuid::new_v4().to_string()
+}
+
+// --- 4. 核心：认证提取器 (AuthUser Extractor) ---
+// 用于在 Handler 中通过 (user: AuthUser) 自动获取当前登录用户
 
 pub struct AuthUser {
     pub id: i32,
-    // 如果后续不需要在后端逻辑里读取用户名，可以暂时去掉它
-    // 或者加上 #[allow(dead_code)] 告诉编译器这是故意的
     #[allow(dead_code)] 
     pub username: String,
 }
@@ -88,22 +97,26 @@ where
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        // 1. 从 Header 提取 Bearer Token
+        // 1. 从 HTTP Header 提取 Bearer Token
         let TypedHeader(Authorization(bearer)) = parts
             .extract::<TypedHeader<Authorization<Bearer>>>()
             .await
-            .map_err(|_| AppError::Auth("Missing or invalid token".into()))?;
+            .map_err(|_| AppError::Auth("Token 缺失或格式错误".into()))?;
 
-        // 2. 验证 Token
+        // 2. 验证 Token 有效性
         let secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "secret".into());
         let token_data = decode::<Claims>(
             bearer.token(),
             &DecodingKey::from_secret(secret.as_bytes()),
             &Validation::new(Algorithm::HS256),
         )
-        .map_err(|_| AppError::Auth("Invalid token".into()))?;
+        .map_err(|e| {
+            // 如果 Token 过期，jsonwebtoken 会返回特定错误，前端拦截器会捕获并处理
+            tracing::warn!("JWT 验证失败: {}", e);
+            AppError::Auth("Token 已过期或无效".into())
+        })?;
 
-        // 3. 验证通过，返回 AuthUser
+        // 3. 验证通过，构建 AuthUser
         Ok(AuthUser {
             id: token_data.claims.sub,
             username: token_data.claims.username,

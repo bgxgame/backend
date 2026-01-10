@@ -97,6 +97,7 @@ pub struct LoginSchema {
 #[derive(Debug, Serialize)]
 pub struct AuthResponse {
     pub token: String,
+    pub refresh_token: Option<String>,
     pub username: String,
 }
 
@@ -104,4 +105,9 @@ pub struct AuthResponse {
 pub struct IssueQuery {
     pub q: Option<String>,
     pub status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RefreshRequest {
+    pub refresh_token: String,
 }

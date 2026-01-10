@@ -1,5 +1,5 @@
 // src/handlers.rs
-use crate::auth::{create_jwt, hash_password, verify_password, AuthUser};
+use crate::auth::{create_jwt, hash_password, verify_password, AuthUser, generate_refresh_token};
 use crate::models::*;
 use crate::AppError;
 use crate::AppState;
@@ -10,6 +10,7 @@ use axum::{
     Json,
 };
 use serde_json::json;
+use chrono::{Utc, Duration};
 
 // ======= PROJECTS HANDLERS =======
 
@@ -88,7 +89,6 @@ pub async fn get_all_my_issues_handler(
     user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Issue>>, AppError> {
-    // 查询该用户创建的所有任务，不分项目
     let issues = sqlx::query_as::<_, Issue>(
         "SELECT * FROM issues WHERE user_id = $1 ORDER BY updated_at DESC",
     )
@@ -99,14 +99,12 @@ pub async fn get_all_my_issues_handler(
     Ok(Json(issues))
 }
 
-// 获取指定项目下的所有 Issue
 pub async fn get_project_issues_handler(
     user: AuthUser,
     Path(project_id): Path<i32>,
     Query(query): Query<IssueQuery>,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Issue>>, AppError> {
-    // 权限校验：确保该项目属于该用户
     let project_exists = sqlx::query("SELECT id FROM projects WHERE id = $1 AND user_id = $2")
         .bind(project_id)
         .bind(user.id)
@@ -138,7 +136,6 @@ pub async fn create_issue_handler(
     State(state): State<AppState>,
     ValidatedJson(body): ValidatedJson<CreateIssueSchema>,
 ) -> Result<Json<Issue>, AppError> {
-    // 确保项目属于该用户
     let project_owned = sqlx::query("SELECT id FROM projects WHERE id = $1 AND user_id = $2")
         .bind(body.project_id)
         .bind(user.id)
@@ -169,17 +166,9 @@ pub async fn update_issue_handler(
     State(state): State<AppState>,
     ValidatedJson(body): ValidatedJson<UpdateIssueSchema>,
 ) -> Result<Json<Issue>, AppError> {
-    // 业务层校验：如果传了描述且不是空的，则必须大于 5 字
-    if let Some(ref desc) = body.description {
-        if !desc.is_empty() && desc.len() < 5 {
-            return Err(AppError::BadRequest("描述内容如果填写，则至少需要 5 个字".into()));
-        }
-    }
-
     let issue = sqlx::query_as::<_, Issue>(
         r#"UPDATE issues SET 
             title = COALESCE($1, title),
-            -- 这里的处理逻辑：如果是 None 则不改动，如果是 Some("") 则会更新为 SQL NULL 或空字符串
             description = CASE WHEN $2 IS NULL THEN description ELSE $2 END,
             status = COALESCE($3, status),
             priority = COALESCE($4, priority),
@@ -188,13 +177,8 @@ pub async fn update_issue_handler(
          WHERE id = $6 AND user_id = $7
          RETURNING *"#,
     )
-    .bind(body.title)       // $1
-    .bind(body.description) // $2 (可以是 Some(""), Some("内容"), 或 None)
-    .bind(body.status)      // $3
-    .bind(body.priority)    // $4
-    .bind(body.due_date)    // $5
-    .bind(id)               // $6
-    .bind(user.id)          // $7
+    .bind(body.title).bind(body.description).bind(body.status).bind(body.priority).bind(body.due_date)
+    .bind(id).bind(user.id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::NotFound("任务未找到".into()))?;
@@ -213,7 +197,7 @@ pub async fn delete_issue_handler(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ======= AUTH HANDLERS =======
+// ======= AUTH HANDLERS (无感刷新版本) =======
 
 pub async fn register_handler(
     State(state): State<AppState>,
@@ -229,6 +213,7 @@ pub async fn login_handler(
     State(state): State<AppState>,
     ValidatedJson(payload): ValidatedJson<LoginSchema>,
 ) -> Result<Json<AuthResponse>, AppError> {
+    // 1. 验证用户
     let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = $1")
         .bind(&payload.username).fetch_optional(&state.db).await?
         .ok_or_else(|| AppError::Auth("用户名或密码错误".into()))?;
@@ -237,6 +222,52 @@ pub async fn login_handler(
         return Err(AppError::Auth("用户名或密码错误".into()));
     }
 
+    // 2. 生成 Access Token (短效)
     let token = create_jwt(user.id, &user.username).map_err(|_| AppError::Internal)?;
-    Ok(Json(AuthResponse { token, username: user.username }))
+
+    // 3. 生成并存储 Refresh Token (长效)
+    let refresh_token_str = generate_refresh_token();
+    let expires_at = Utc::now() + Duration::days(7); // 7天有效期
+
+    sqlx::query(
+        "INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)"
+    )
+    .bind(user.id)
+    .bind(&refresh_token_str)
+    .bind(expires_at)
+    .execute(&state.db)
+    .await?;
+
+    Ok(Json(AuthResponse { 
+        token, 
+        refresh_token: Some(refresh_token_str),
+        username: user.username 
+    }))
+}
+
+// 核心：无感刷新接口
+pub async fn refresh_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<RefreshRequest>,
+) -> Result<Json<AuthResponse>, AppError> {
+    // 1. 检查数据库中是否存在该 Token 且未过期
+    let row = sqlx::query!(
+        r#"SELECT r.user_id, u.username FROM refresh_tokens r
+           JOIN users u ON r.user_id = u.id
+           WHERE r.token = $1 AND r.expires_at > NOW()"#,
+        payload.refresh_token
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::Auth("登录已过期，请重新登录".into()))?;
+
+    // 2. 签发新的 Access Token
+    let new_access_token = create_jwt(row.user_id, &row.username).map_err(|_| AppError::Internal)?;
+
+    // 3. 返回新 Token (这里沿用旧的 Refresh Token，也可以在这里进行滚动更新)
+    Ok(Json(AuthResponse {
+        token: new_access_token,
+        refresh_token: Some(payload.refresh_token),
+        username: row.username,
+    }))
 }

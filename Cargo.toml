@@ -40,3 +40,5 @@ tower-http = { version = "0.5", features = ["cors"] }
 thiserror = "1.0"
 
 validator = { version = "0.19", features = ["derive"] }
+
+uuid = { version = "1", features = ["v4"] }

@@ -44,8 +44,7 @@ The content is organized as follows:
 .gitignore
 Cargo.toml
 data.json
-migrations/20251230160043_init_schema.down.sql
-migrations/20251230160043_init_schema.up.sql
+init_schema.sql
 README.md
 register.json
 register2.json
@@ -77,10 +76,82 @@ JWT_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxx
 }
 </file>
 
-<file path="migrations/20251230160043_init_schema.down.sql">
--- Add down migration script here
-DROP TABLE IF EXISTS plans;
+<file path="init_schema.sql">
+-- 1. 清理旧表
+DROP TABLE IF EXISTS issues;
+DROP TABLE IF EXISTS projects;
 DROP TABLE IF EXISTS users;
+
+-- 2. 创建用户表
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(50) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 3. 创建项目表 (Project)
+CREATE TABLE projects (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name VARCHAR(100) NOT NULL,
+    description TEXT,
+    
+    -- 项目状态: backlog(积压), active(激活), completed(完成), paused(暂停), canceled(取消)
+    status VARCHAR(20) NOT NULL DEFAULT 'active',
+    
+    -- 视觉标识 (Linear 风格常用)
+    color VARCHAR(7) DEFAULT '#5E6AD2', -- 项目主题色
+    
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 4. 创建任务表 (Issue)
+CREATE TABLE issues (
+    id SERIAL PRIMARY KEY,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, -- 创建者/负责人
+    
+    title VARCHAR(255) NOT NULL,
+    description TEXT, -- 支持 Markdown
+    
+    -- 任务状态: backlog, todo, in_progress, done, canceled
+    status VARCHAR(20) NOT NULL DEFAULT 'todo',
+    
+    -- 优先级: 0(无), 1(低), 2(中), 3(高), 4(紧急)
+    priority INTEGER NOT NULL DEFAULT 0,
+    
+    due_date TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 5. 创建索引提高查询效率
+CREATE INDEX idx_projects_user_id ON projects(user_id);
+CREATE INDEX idx_issues_project_id ON issues(project_id);
+CREATE INDEX idx_issues_user_id ON issues(user_id);
+
+-- 6. 自动更新 updated_at 的触发器函数 (PostgreSQL 特色)
+CREATE OR REPLACE FUNCTION update_modified_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+CREATE TRIGGER update_projects_modtime BEFORE UPDATE ON projects FOR EACH ROW EXECUTE PROCEDURE update_modified_column();
+CREATE TRIGGER update_issues_modtime BEFORE UPDATE ON issues FOR EACH ROW EXECUTE PROCEDURE update_modified_column();
+
+
+CREATE TABLE refresh_tokens (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token TEXT NOT NULL UNIQUE,
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
 </file>
 
 <file path="register.json">
@@ -90,45 +161,6 @@ DROP TABLE IF EXISTS users;
 <file path=".gitignore">
 /target
 .env
-</file>
-
-<file path="migrations/20251230160043_init_schema.up.sql">
--- Add up migration script here
-CREATE TABLE users (
-    id SERIAL PRIMARY KEY,                     -- 自增主键
-    username VARCHAR(50) NOT NULL UNIQUE,      -- 用户名，必须唯一
-    password_hash VARCHAR(255) NOT NULL,       -- 密码哈希 (严禁明文存储，推荐 Argon2)
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP -- 创建时间
-);
-
-CREATE TABLE plans (
-    id SERIAL PRIMARY KEY,
-
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, -- 关联用户
-
-    -- 核心内容
-    title VARCHAR(150) NOT NULL,               -- 计划标题
-    description TEXT,                          -- 详细描述 (支持 Markdown 更好)
-    
-    -- 状态管理 (建议前端做枚举映射)
-    -- values: 'pending'(待办), 'in_progress'(进行中), 'completed'(已完成), 'archived'(归档)
-    status VARCHAR(20) NOT NULL DEFAULT 'pending', 
-    
-    -- 分类与优先级
-    category VARCHAR(50) DEFAULT 'life',       -- 例如: 'work', 'life', 'study'
-    priority INTEGER DEFAULT 0,                -- 优先级: 0(普通), 1(重要), 2(紧急)
-    
-    -- 时间管理
-    due_date TIMESTAMP WITH TIME ZONE,         -- 截止日期 (可为空)
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    
-    -- 权限控制
-    -- 如果是 false，只有登录后可见；如果是 true，游客可见
-    is_public BOOLEAN NOT NULL DEFAULT TRUE    
-);
--- 建议添加索引以提高查询效率
-CREATE INDEX idx_plans_user_id ON plans(user_id);
 </file>
 
 <file path="register2.json">
@@ -213,6 +245,8 @@ tower-http = { version = "0.5", features = ["cors"] }
 thiserror = "1.0"
 
 validator = { version = "0.19", features = ["derive"] }
+
+uuid = { version = "1", features = ["v4"] }
 </file>
 
 <file path="README.md">
@@ -343,19 +377,18 @@ use chrono::{Utc, Duration};
 use axum::{
     async_trait,
     extract::FromRequestParts,
-    http::{request::Parts, StatusCode},
-    response::{IntoResponse, Response},
-    Json, RequestPartsExt,
+    http::request::Parts,
+    RequestPartsExt,
 };
 use axum_extra::{
     headers::{authorization::Bearer, Authorization},
     TypedHeader,
 };
-use serde_json::json;
-use crate::AppError; // 引入自定义错误
-// --- 1. 密码处理 ---
+use crate::AppError; 
+use uuid::Uuid;
 
-// 加密密码
+// --- 1. 密码处理 (Argon2) ---
+
 pub fn hash_password(password: &str) -> Result<String, String> {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
@@ -365,7 +398,6 @@ pub fn hash_password(password: &str) -> Result<String, String> {
     Ok(password_hash)
 }
 
-// 验证密码
 pub fn verify_password(password: &str, password_hash: &str) -> bool {
     let parsed_hash = match PasswordHash::new(password_hash) {
         Ok(h) => h,
@@ -374,20 +406,20 @@ pub fn verify_password(password: &str, password_hash: &str) -> bool {
     Argon2::default().verify_password(password.as_bytes(), &parsed_hash).is_ok()
 }
 
-// --- 2. JWT 处理 ---
+// --- 2. JWT (Access Token) 处理 ---
 
-// Token 里的数据结构 (Claims)
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: i32,    // 将 sub 改为用户 ID (i32)
-    pub username: String, // 保留用户名用于显示
-    pub exp: usize,
+    pub sub: i32,         // 用户 ID
+    pub username: String, 
+    pub exp: usize,       // 过期时间
 }
 
-// 创建 Token
+/// 生成短效的 Access Token (用于 API 请求)
+/// 建议有效期：15 分钟
 pub fn create_jwt(user_id: i32, username: &str) -> Result<String, String> {
     let expiration = Utc::now()
-        .checked_add_signed(Duration::hours(24)) // Token 24小时有效
+        .checked_add_signed(Duration::seconds(30)) 
         .expect("valid timestamp")
         .timestamp();
 
@@ -407,12 +439,19 @@ pub fn create_jwt(user_id: i32, username: &str) -> Result<String, String> {
     .map_err(|e| e.to_string())
 }
 
-// --- 3. 核心：认证提取器 (Extractor) ---
-// 这是一个“守门员”。任何在参数里写了 AuthUser 的接口，都会先经过这里。
-// 如果 Token 无效，直接拒绝请求，代码都不会进入 handler。
+// --- 3. Refresh Token 处理 ---
+
+/// 生成唯一的随机字符串作为刷新令牌
+pub fn generate_refresh_token() -> String {
+    Uuid::new_v4().to_string()
+}
+
+// --- 4. 核心：认证提取器 (AuthUser Extractor) ---
+// 用于在 Handler 中通过 (user: AuthUser) 自动获取当前登录用户
 
 pub struct AuthUser {
-    pub id: i32,      // 包含 ID
+    pub id: i32,
+    #[allow(dead_code)] 
     pub username: String,
 }
 
@@ -424,22 +463,26 @@ where
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        // 1. 从 Header 提取 Bearer Token
+        // 1. 从 HTTP Header 提取 Bearer Token
         let TypedHeader(Authorization(bearer)) = parts
             .extract::<TypedHeader<Authorization<Bearer>>>()
             .await
-            .map_err(|_| AppError::Auth("Missing or invalid token".into()))?;
+            .map_err(|_| AppError::Auth("Token 缺失或格式错误".into()))?;
 
-        // 2. 验证 Token
+        // 2. 验证 Token 有效性
         let secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "secret".into());
         let token_data = decode::<Claims>(
             bearer.token(),
             &DecodingKey::from_secret(secret.as_bytes()),
             &Validation::new(Algorithm::HS256),
         )
-        .map_err(|_| AppError::Auth("Invalid token".into()))?;
+        .map_err(|e| {
+            // 如果 Token 过期，jsonwebtoken 会返回特定错误，前端拦截器会捕获并处理
+            tracing::warn!("JWT 验证失败: {}", e);
+            AppError::Auth("Token 已过期或无效".into())
+        })?;
 
-        // 3. 验证通过，返回 AuthUser
+        // 3. 验证通过，构建 AuthUser
         Ok(AuthUser {
             id: token_data.claims.sub,
             username: token_data.claims.username,
@@ -451,39 +494,38 @@ where
 <file path="src/main.rs">
 // src/main.rs
 use axum::{
-    routing::{get, post, patch, delete}, // 引入更多路由方法
+    http::Method,
+    routing::{delete, get, patch, post},
     Router,
-    http::{Method, HeaderValue}, // 引入 Method 和 HeaderValue
 };
-use tower_http::cors::{CorsLayer, Any}; // 引入 CORS 相关
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::net::SocketAddr;
+use tower_http::cors::{Any, CorsLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-// 引入模块
+mod auth;
+mod error;
 mod handlers;
 mod models;
-mod auth;
-mod error; // 引入新模块
-pub use error::AppError; // 导出方便其他地方使用
-mod validation; // <--- 添加这一行，让编译器知道 validation.rs 的存在
+mod validation;
 
-// 使用 handlers 中的函数
-use handlers::{
-    create_plan_handler, delete_plan_handler, get_plans_handler, update_plan_handler,
-    login_handler, register_handler
-};
+pub use error::AppError;
+
+use handlers::*;
 
 #[derive(Clone)]
-pub struct AppState { // 注意加上 pub，因为 handlers 里要用
-    pub db: PgPool,   // 注意加上 pub
+pub struct AppState {
+    pub db: PgPool,
 }
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "debug".into()))
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "debug".into()),
+        )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
@@ -496,36 +538,36 @@ async fn main() {
         .await
         .expect("Failed to connect to Postgres");
 
-    tracing::info!("✅ 成功连接到数据库!");
+    tracing::info!("✅ 数据库连接成功!");
 
     let state = AppState { db: pool };
 
-        // --- CORS 配置 (关键步骤) ---
-    // 允许前端 (http://localhost:5173) 访问后端
     let cors = CorsLayer::new()
-        // 允许的来源：为了开发方便，这里先设为 Any (允许所有)，
-        // 生产环境建议改为 specific origin: "http://localhost:5173".parse::<HeaderValue>().unwrap()
-        .allow_origin(Any) 
-        // 允许的方法
+        .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
-        // 允许的头 (Authorization 等)
         .allow_headers(Any);
 
-    // 定义路由
     let app = Router::new()
-        // 公开路由
-        .route("/api/plans", get(get_plans_handler))
-        .route("/api/register", post(register_handler)) // 注册
-        .route("/api/login", post(login_handler))       // 登录
-        // 受保护路由 (在 handlers 内部通过 AuthUser 参数保护，这里路由写法看起来一样)
-        .route("/api/plans", post(create_plan_handler))
-        .route("/api/plans/:id", patch(update_plan_handler))
-        .route("/api/plans/:id", delete(delete_plan_handler))
+        // 认证
+        .route("/api/register", post(register_handler))
+        .route("/api/login", post(login_handler))
+        .route("/api/refresh", post(refresh_handler))
+        // 项目路由
+        .route("/api/projects", get(get_projects_handler))
+        .route("/api/projects", post(create_project_handler))
+        .route("/api/projects/:id", patch(update_project_handler))
+        .route("/api/projects/:id", delete(delete_project_handler))
+        // 任务路由
+        .route("/api/issues", get(get_all_my_issues_handler))
+        .route("/api/projects/:id/issues", get(get_project_issues_handler)) // 获取项目下的 Issue
+        .route("/api/issues", post(create_issue_handler))
+        .route("/api/issues/:id", patch(update_issue_handler))
+        .route("/api/issues/:id", delete(delete_issue_handler))
         .with_state(state)
         .layer(cors);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    tracing::info!("🚀 服务器正在监听: {}", addr);
+    tracing::info!("🚀 服务器运行在: {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
@@ -539,7 +581,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde_json::{json, Value};
+use serde_json::json;
 use thiserror::Error;
 use validator::ValidationErrors;
 
@@ -553,6 +595,10 @@ pub enum AppError {
 
     #[error("Not found")]
     NotFound(String),
+
+    // --- 新增：处理权限不足 (403) ---
+    #[error("Forbidden: {0}")]
+    Forbidden(String),
 
     #[error("Internal server error")]
     Internal,
@@ -581,8 +627,11 @@ impl IntoResponse for AppError {
             }
             AppError::Auth(msg) => (StatusCode::UNAUTHORIZED, msg, None),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg, None),
+            
+            // --- 映射 Forbidden 到 403 ---
+            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg, None),
+
             AppError::ValidationError(e) => {
-                // 将 validator 的错误提取为 field -> message 的 Map
                 let mut errors = std::collections::HashMap::new();
                 for (field, field_errors) in e.field_errors() {
                     let msgs: Vec<String> = field_errors
@@ -613,7 +662,7 @@ impl IntoResponse for AppError {
         let body = Json(json!({
             "status": "error",
             "message": message,
-            "errors": details // 这里的具体错误字段供前端解析
+            "errors": details
         }));
 
         (status, body).into_response()
@@ -623,188 +672,276 @@ impl IntoResponse for AppError {
 
 <file path="src/handlers.rs">
 // src/handlers.rs
-use crate::auth::{create_jwt, hash_password, verify_password, AuthUser}; // 引入 AuthUser
-use crate::models::{
-    AuthResponse,
-    CreatePlanSchema,
-    LoginSchema,
-    Plan,
-    RegisterSchema,
-    UpdatePlanSchema,
-    User, // <--- 确保引入 User
-};
+use crate::auth::{create_jwt, hash_password, verify_password, AuthUser, generate_refresh_token};
+use crate::models::*;
 use crate::AppError;
 use crate::AppState;
+use crate::validation::ValidatedJson;
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
-use serde_json::json; // <--- 修复报错：引入 json! 宏 // 引入自定义错误
-use crate::validation::ValidatedJson; // 引入我们的提取器
-use axum::extract::Query; // 引入 Query 提取器
-use crate::models::PlanQuery; // 引入刚才定义的结构体
+use serde_json::json;
+use chrono::{Utc, Duration};
 
-// --- 1. 获取列表 (GET /plans) ---
-pub async fn get_plans_handler(
-    auth: Option<AuthUser>, // 可选认证：登录后能看到自己的私有计划
-    Query(query): Query<PlanQuery>, // 获取 URL 参数，例如 ?q=rust&status=pending
+// ======= PROJECTS HANDLERS =======
+
+pub async fn get_projects_handler(
+    user: AuthUser,
     State(state): State<AppState>,
-) -> Result<Json<Vec<Plan>>, AppError> {
-    let user_id = auth.map(|u| u.id).unwrap_or(-1); // 如果没登录，user_id 设为不可能的值
-
-    // 构建动态查询 SQL
-    // ILIKE 是 PostgreSQL 的不区分大小写模糊查询
-    let plans = sqlx::query_as::<_, Plan>(
-        r#"
-        SELECT * FROM plans 
-        WHERE (is_public = 't' OR user_id = $1)
-          AND ($2 IS NULL OR title ILIKE $2 OR description ILIKE $2)
-          AND ($3 IS NULL OR status = $3)
-          AND ($4 IS NULL OR category = $4)
-        ORDER BY created_at DESC
-        "#,
+) -> Result<Json<Vec<Project>>, AppError> {
+    let projects = sqlx::query_as::<_, Project>(
+        "SELECT * FROM projects WHERE user_id = $1 ORDER BY updated_at DESC",
     )
-    .bind(user_id)
-    .bind(query.q.map(|s| format!("%{}%", s))) // 包装成 SQL 模糊匹配格式 %key%
-    .bind(query.status)
-    .bind(query.category)
+    .bind(user.id)
     .fetch_all(&state.db)
     .await?;
-
-
-    Ok(Json(plans))
+    Ok(Json(projects))
 }
 
-// --- 2. 创建计划 (POST /plans) ---
-pub async fn create_plan_handler(
-    user: AuthUser, // 强制要求登录
+pub async fn create_project_handler(
+    user: AuthUser,
     State(state): State<AppState>,
-    ValidatedJson(body): ValidatedJson<CreatePlanSchema>, // 这里的 ValidatedJson 会自动校验
-) -> Result<Json<Plan>, AppError> {
-
-    // 插入数据 
-    let plan = sqlx::query_as::<_, Plan>(
-        "INSERT INTO plans (title, description, category, priority, due_date, is_public, user_id) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7) 
-         RETURNING *",
+    ValidatedJson(body): ValidatedJson<CreateProjectSchema>,
+) -> Result<Json<Project>, AppError> {
+    let project = sqlx::query_as::<_, Project>(
+        "INSERT INTO projects (user_id, name, description, color) VALUES ($1, $2, $3, $4) RETURNING *",
     )
-    .bind(body.title)
-    .bind(body.description)
-    .bind(body.category)
-    .bind(body.priority.unwrap_or(0)) // 默认为 0
-    .bind(body.due_date)
-    .bind(body.is_public)
     .bind(user.id)
+    .bind(body.name)
+    .bind(body.description)
+    .bind(body.color.unwrap_or_else(|| "#5E6AD2".to_string()))
     .fetch_one(&state.db)
     .await?;
-    Ok(Json(plan))
+    Ok(Json(project))
 }
 
-// --- 3. 更新计划 (PATCH /plans/:id) ---
-pub async fn update_plan_handler(
-    Path(id): Path<i32>,
+pub async fn update_project_handler(
     user: AuthUser,
+    Path(id): Path<i32>,
     State(state): State<AppState>,
-    ValidatedJson(body): ValidatedJson<UpdatePlanSchema>, // 自动校验
-) -> Result<Json<Plan>, AppError> {
-    // 使用 fetch_optional 来判断更新是否成功（是否找到属于该用户的记录）
-    let plan = sqlx::query_as::<_, Plan>(
-        "UPDATE plans SET 
-            title = COALESCE($1, title),
+    ValidatedJson(body): ValidatedJson<UpdateProjectSchema>,
+) -> Result<Json<Project>, AppError> {
+    let project = sqlx::query_as::<_, Project>(
+        r#"UPDATE projects SET 
+            name = COALESCE($1, name),
             description = COALESCE($2, description),
             status = COALESCE($3, status),
-            category = COALESCE($4, category),
-            priority = COALESCE($5, priority), -- 新增
-            due_date = COALESCE($6, due_date),
-            is_public = COALESCE($7, is_public),
+            color = COALESCE($4, color),
             updated_at = NOW()
-         WHERE id = $8 AND user_id = $9
-         RETURNING *",
+         WHERE id = $5 AND user_id = $6
+         RETURNING *"#,
     )
-    .bind(body.title)
-    .bind(body.description)
-    .bind(body.status)
-    .bind(body.category)
-    .bind(body.priority) // $5
-    .bind(body.due_date) // $6
-    .bind(body.is_public)// $7
-    .bind(id)            // $8
-    .bind(user.id)       // $9
+    .bind(body.name).bind(body.description).bind(body.status).bind(body.color)
+    .bind(id).bind(user.id)
     .fetch_optional(&state.db)
     .await?
-    .ok_or_else(|| AppError::NotFound("...".into()))?;
+    .ok_or_else(|| AppError::NotFound("项目未找到".into()))?;
 
-    Ok(Json(plan))
+    Ok(Json(project))
 }
 
-// --- 4. 删除计划 (DELETE /plans/:id) ---
-pub async fn delete_plan_handler(
-    Path(id): Path<i32>,
+pub async fn delete_project_handler(
     user: AuthUser,
+    Path(id): Path<i32>,
     State(state): State<AppState>,
 ) -> Result<StatusCode, AppError> {
-    let result = sqlx::query("DELETE FROM plans WHERE id = $1 AND user_id = $2")
+    let res = sqlx::query("DELETE FROM projects WHERE id = $1 AND user_id = $2")
         .bind(id)
         .bind(user.id)
         .execute(&state.db)
         .await?;
-
-    // 检查是否有行被删除
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound(
-            "Plan not found or you don't have permission".to_string(),
-        ));
-    }
-
-    Ok(StatusCode::NO_CONTENT) // 204 No Content
+    if res.rows_affected() == 0 { return Err(AppError::NotFound("项目不存在或无权操作".into())); }
+    Ok(StatusCode::NO_CONTENT)
 }
 
-// --- 5. 用户注册 ---
-pub async fn register_handler(
-    State(state): State<AppState>,
-    ValidatedJson(payload): ValidatedJson<RegisterSchema>, // 自动校验
-) -> Result<Json<serde_json::Value>, AppError> {
-    // 1. 哈希密码
-    // 修复报错：使用 map_err 将 String 错误转换为 (StatusCode, String)
-    let hashed_password =
-        hash_password(&payload.password).map_err(|e| AppError::Internal)?; // 转换加密库的错误
+// ======= ISSUES HANDLERS =======
 
-    // 2. 存入数据库
-    let _ = sqlx::query("INSERT INTO users (username, password_hash) VALUES ($1, $2)")
-        .bind(&payload.username)
-        .bind(hashed_password)
-        .execute(&state.db)
+pub async fn get_all_my_issues_handler(
+    user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Issue>>, AppError> {
+    let issues = sqlx::query_as::<_, Issue>(
+        "SELECT * FROM issues WHERE user_id = $1 ORDER BY updated_at DESC",
+    )
+    .bind(user.id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(issues))
+}
+
+pub async fn get_project_issues_handler(
+    user: AuthUser,
+    Path(project_id): Path<i32>,
+    Query(query): Query<IssueQuery>,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Issue>>, AppError> {
+    let project_exists = sqlx::query("SELECT id FROM projects WHERE id = $1 AND user_id = $2")
+        .bind(project_id)
+        .bind(user.id)
+        .fetch_optional(&state.db)
         .await?;
 
+    if project_exists.is_none() { return Err(AppError::Forbidden("无权访问该项目".into())); }
+
+    let issues = sqlx::query_as::<_, Issue>(
+        r#"
+        SELECT * FROM issues 
+        WHERE project_id = $1 
+          AND ($2 IS NULL OR title ILIKE $2 OR description ILIKE $2)
+          AND ($3 IS NULL OR status = $3)
+        ORDER BY priority DESC, created_at DESC
+        "#,
+    )
+    .bind(project_id)
+    .bind(query.q.map(|s| format!("%{}%", s)))
+    .bind(query.status)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(issues))
+}
+
+pub async fn create_issue_handler(
+    user: AuthUser,
+    State(state): State<AppState>,
+    ValidatedJson(body): ValidatedJson<CreateIssueSchema>,
+) -> Result<Json<Issue>, AppError> {
+    let project_owned = sqlx::query("SELECT id FROM projects WHERE id = $1 AND user_id = $2")
+        .bind(body.project_id)
+        .bind(user.id)
+        .fetch_optional(&state.db)
+        .await?;
+
+    if project_owned.is_none() { return Err(AppError::BadRequest("目标项目不存在".into())); }
+
+    let issue = sqlx::query_as::<_, Issue>(
+        r#"INSERT INTO issues (project_id, user_id, title, description, priority, due_date) 
+           VALUES ($1, $2, $3, $4, $5, $6) RETURNING *"#,
+    )
+    .bind(body.project_id)
+    .bind(user.id)
+    .bind(body.title)
+    .bind(body.description)
+    .bind(body.priority.unwrap_or(0))
+    .bind(body.due_date)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(issue))
+}
+
+pub async fn update_issue_handler(
+    user: AuthUser,
+    Path(id): Path<i32>,
+    State(state): State<AppState>,
+    ValidatedJson(body): ValidatedJson<UpdateIssueSchema>,
+) -> Result<Json<Issue>, AppError> {
+    let issue = sqlx::query_as::<_, Issue>(
+        r#"UPDATE issues SET 
+            title = COALESCE($1, title),
+            description = CASE WHEN $2 IS NULL THEN description ELSE $2 END,
+            status = COALESCE($3, status),
+            priority = COALESCE($4, priority),
+            due_date = COALESCE($5, due_date),
+            updated_at = NOW()
+         WHERE id = $6 AND user_id = $7
+         RETURNING *"#,
+    )
+    .bind(body.title).bind(body.description).bind(body.status).bind(body.priority).bind(body.due_date)
+    .bind(id).bind(user.id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("任务未找到".into()))?;
+
+    Ok(Json(issue))
+}
+
+pub async fn delete_issue_handler(
+    user: AuthUser,
+    Path(id): Path<i32>,
+    State(state): State<AppState>,
+) -> Result<StatusCode, AppError> {
+    let res = sqlx::query("DELETE FROM issues WHERE id = $1 AND user_id = $2")
+        .bind(id).bind(user.id).execute(&state.db).await?;
+    if res.rows_affected() == 0 { return Err(AppError::NotFound("任务未找到".into())); }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ======= AUTH HANDLERS (无感刷新版本) =======
+
+pub async fn register_handler(
+    State(state): State<AppState>,
+    ValidatedJson(payload): ValidatedJson<RegisterSchema>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let hashed_password = hash_password(&payload.password).map_err(|_| AppError::Internal)?;
+    sqlx::query("INSERT INTO users (username, password_hash) VALUES ($1, $2)")
+        .bind(&payload.username).bind(hashed_password).execute(&state.db).await?;
     Ok(Json(json!({"message": "User registered successfully"})))
 }
 
-// --- 6. 用户登录 ---
 pub async fn login_handler(
     State(state): State<AppState>,
-    Json(payload): Json<LoginSchema>,
+    ValidatedJson(payload): ValidatedJson<LoginSchema>,
 ) -> Result<Json<AuthResponse>, AppError> {
-    // 1. 查找用户
+    // 1. 验证用户
     let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = $1")
-        .bind(&payload.username)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| AppError::Auth("Invalid username or password".into()))?;
+        .bind(&payload.username).fetch_optional(&state.db).await?
+        .ok_or_else(|| AppError::Auth("用户名或密码错误".into()))?;
 
-    // 2. 验证密码
     if !verify_password(&payload.password, &user.password_hash) {
-        return Err(AppError::Auth("Invalid username or password".into()));
+        return Err(AppError::Auth("用户名或密码错误".into()));
     }
 
-    // 3. 生成 Token
-    // 修复报错：使用 map_err 将 String 错误转换为 (StatusCode, String)
-    let token =
-        create_jwt(user.id, &user.username).map_err(|e| AppError::Internal)?;
+    // 2. 生成 Access Token (短效)
+    let token = create_jwt(user.id, &user.username).map_err(|_| AppError::Internal)?;
 
+    // 3. 生成并存储 Refresh Token (长效)
+    let refresh_token_str = generate_refresh_token();
+    let expires_at = Utc::now() + Duration::days(7); // 7天有效期
+
+    sqlx::query(
+        "INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)"
+    )
+    .bind(user.id)
+    .bind(&refresh_token_str)
+    .bind(expires_at)
+    .execute(&state.db)
+    .await?;
+
+    Ok(Json(AuthResponse { 
+        token, 
+        refresh_token: Some(refresh_token_str),
+        username: user.username 
+    }))
+}
+
+// 核心：无感刷新接口
+pub async fn refresh_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<RefreshRequest>,
+) -> Result<Json<AuthResponse>, AppError> {
+    // 1. 检查数据库中是否存在该 Token 且未过期
+    let row = sqlx::query!(
+        r#"SELECT r.user_id, u.username FROM refresh_tokens r
+           JOIN users u ON r.user_id = u.id
+           WHERE r.token = $1 AND r.expires_at > NOW()"#,
+        payload.refresh_token
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::Auth("登录已过期，请重新登录".into()))?;
+
+    // 2. 签发新的 Access Token
+    let new_access_token = create_jwt(row.user_id, &row.username).map_err(|_| AppError::Internal)?;
+
+    // 3. 返回新 Token (这里沿用旧的 Refresh Token，也可以在这里进行滚动更新)
     Ok(Json(AuthResponse {
-        token,
-        username: user.username,
+        token: new_access_token,
+        refresh_token: Some(payload.refresh_token),
+        username: row.username,
     }))
 }
 </file>
@@ -814,70 +951,84 @@ pub async fn login_handler(
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
-use validator::Validate; // 引入 Validate trait
+use validator::Validate;
 
-// --- 1. User 模型 (数据库对应) ---
-#[derive(Debug, FromRow, Deserialize, Serialize)]
-pub struct User {
-    pub id: i32,
-    pub username: String,
-    #[serde(skip)] // 序列化时跳过密码
-    pub password_hash: String,
-
-    pub created_at: Option<DateTime<Utc>>,
-}
-
-// --- 2. Plan 模型 (数据库对应) ---
+// --- 1. Project 模型 ---
 #[derive(Debug, FromRow, Serialize)]
-pub struct Plan {
+pub struct Project {
     pub id: i32,
-    pub user_id: i32, // 新增字段
-    pub title: String,
+    pub user_id: i32,
+    pub name: String,
     pub description: Option<String>,
     pub status: String,
-    pub category: Option<String>,
-    pub priority: i32,
-    pub due_date: Option<DateTime<Utc>>,
-    pub is_public: bool,
+    pub color: Option<String>,
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
 }
 
-// --- 3. CRUD 请求结构体 ---
 #[derive(Debug, Deserialize, Validate)]
-pub struct CreatePlanSchema {
-    #[validate(length(min = 1, max = 150, message = "标题不能为空且不能超过 150 字"))]
+pub struct CreateProjectSchema {
+    #[validate(length(min = 1, max = 100, message = "项目名称不能为空"))]
+    pub name: String,
+    pub description: Option<String>,
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct UpdateProjectSchema {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub status: Option<String>,
+    pub color: Option<String>,
+}
+
+// --- 2. Issue 模型 (由原 Plan 升级) ---
+#[derive(Debug, FromRow, Serialize)]
+pub struct Issue {
+    pub id: i32,
+    pub project_id: i32,
+    pub user_id: i32,
+    pub title: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub priority: i32,
+    pub due_date: Option<DateTime<Utc>>,
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize, Validate)]
+pub struct CreateIssueSchema {
+    pub project_id: i32, // 必须指定所属项目
+    #[validate(length(min = 1, max = 255, message = "标题不能为空"))]
     pub title: String,
     #[validate(length(min = 5, message = "描述内容至少需要 5 个字"))]
     pub description: Option<String>,
-    #[validate(length(max = 50, message = "分类名称过长"))]
-    pub category: Option<String>,
     pub priority: Option<i32>,
     pub due_date: Option<DateTime<Utc>>,
-    #[serde(default = "default_is_public")]
-    pub is_public: bool,
-}
-
-fn default_is_public() -> bool {
-    true
 }
 
 #[derive(Debug, Deserialize, Validate)]
-pub struct UpdatePlanSchema {
-    // 更新时，如果传了标题，则必须满足长度
-    #[validate(length(min = 2, max = 150, message = "标题至少需要 2 个字"))]
+pub struct UpdateIssueSchema {
+    #[validate(length(min = 1, max = 255, message = "标题不能为空"))]
     pub title: Option<String>,
-    // 修复点：增加描述校验，确保更新时如果修改了描述，长度也要够
-    #[validate(length(min = 5, message = "描述内容太短了，至少 5 个字"))]
+    // #[validate(length(min = 5, message = "描述内容至少需要 5 个字"))]
     pub description: Option<String>,
     pub status: Option<String>,
-    pub category: Option<String>,
     pub priority: Option<i32>,
     pub due_date: Option<DateTime<Utc>>,
-    pub is_public: Option<bool>,
 }
 
-// --- 4. 认证相关结构体 ---
+// --- 3. 认证与查询模型 ---
+#[derive(Debug, FromRow, Deserialize, Serialize)]
+pub struct User {
+    pub id: i32,
+    pub username: String,
+    #[serde(skip)]
+    pub password_hash: String,
+    pub created_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Deserialize, Validate)]
 pub struct RegisterSchema {
     #[validate(length(min = 3, max = 20, message = "用户名长度需在 3-20 位之间"))]
@@ -895,14 +1046,19 @@ pub struct LoginSchema {
 #[derive(Debug, Serialize)]
 pub struct AuthResponse {
     pub token: String,
+    pub refresh_token: Option<String>,
     pub username: String,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PlanQuery {
-    pub q: Option<String>,        // 搜索关键词
-    pub status: Option<String>,   // 状态过滤
-    pub category: Option<String>, // 分类过滤
+pub struct IssueQuery {
+    pub q: Option<String>,
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RefreshRequest {
+    pub refresh_token: String,
 }
 </file>
 
