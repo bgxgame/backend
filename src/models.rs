@@ -111,3 +111,19 @@ pub struct IssueQuery {
 pub struct RefreshRequest {
     pub refresh_token: String,
 }
+
+#[derive(Debug, sqlx::FromRow, serde::Serialize)]
+pub struct Comment {
+    pub id: i32,
+    pub issue_id: i32,
+    pub user_id: i32,
+    pub username: String, // 后面我们通过 JOIN 获取
+    pub content: String,
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, serde::Deserialize, validator::Validate)]
+pub struct CreateCommentSchema {
+    #[validate(length(min = 1, message = "评论内容不能为空"))]
+    pub content: String,
+}

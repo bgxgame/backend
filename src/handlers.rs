@@ -271,3 +271,55 @@ pub async fn refresh_handler(
         username: row.username,
     }))
 }
+
+pub async fn get_issue_comments_handler(
+    user: AuthUser,
+    Path(issue_id): Path<i32>,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Comment>>, AppError> {
+    // 检查 Issue 是否存在且用户有权访问（通过项目所属权判断）
+    let comments = sqlx::query_as::<_, Comment>(
+        r#"
+        SELECT c.*, u.username 
+        FROM comments c
+        JOIN users u ON c.user_id = u.id
+        JOIN issues i ON c.issue_id = i.id
+        JOIN projects p ON i.project_id = p.id
+        WHERE c.issue_id = $1 AND p.user_id = $2
+        ORDER BY c.created_at ASC
+        "#
+    )
+    .bind(issue_id)
+    .bind(user.id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(comments))
+}
+
+pub async fn create_comment_handler(
+    user: AuthUser,
+    Path(issue_id): Path<i32>,
+    State(state): State<AppState>,
+    ValidatedJson(body): ValidatedJson<CreateCommentSchema>,
+) -> Result<Json<Comment>, AppError> {
+    // 插入评论
+    let comment = sqlx::query_as::<_, Comment>(
+        r#"
+        WITH inserted AS (
+            INSERT INTO comments (issue_id, user_id, content)
+            VALUES ($1, $2, $3)
+            RETURNING *
+        )
+        SELECT i.*, u.username FROM inserted i
+        JOIN users u ON i.user_id = u.id
+        "#
+    )
+    .bind(issue_id)
+    .bind(user.id)
+    .bind(body.content)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(comment))
+}

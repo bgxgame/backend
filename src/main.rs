@@ -69,6 +69,8 @@ async fn main() {
         .route("/api/issues", post(create_issue_handler))
         .route("/api/issues/:id", patch(update_issue_handler))
         .route("/api/issues/:id", delete(delete_issue_handler))
+        .route("/api/issues/:id/comments", get(get_issue_comments_handler))
+        .route("/api/issues/:id/comments", post(create_comment_handler))
         .with_state(state)
         .layer(cors);
 
