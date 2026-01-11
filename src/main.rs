@@ -65,7 +65,8 @@ async fn main() {
         .route("/api/projects/:id", delete(delete_project_handler))
         // 任务路由
         .route("/api/issues", get(get_all_my_issues_handler))
-        .route("/api/projects/:id/issues", get(get_project_issues_handler)) // 获取项目下的 Issue
+        .route("/api/projects/:id/issues", get(get_project_issues_handler))
+        .route("/api/search", get(unified_search_handler))
         .route("/api/issues", post(create_issue_handler))
         .route("/api/issues/:id", patch(update_issue_handler))
         .route("/api/issues/:id", delete(delete_issue_handler))

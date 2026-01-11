@@ -127,3 +127,13 @@ pub struct CreateCommentSchema {
     #[validate(length(min = 1, message = "评论内容不能为空"))]
     pub content: String,
 }
+
+#[derive(Debug, serde::Serialize, sqlx::FromRow)]
+pub struct UnifiedSearchResult {
+    pub r#type: String,       // "project" 或 "issue"
+    pub id: i32,
+    pub title: String,        // 项目名或任务标题
+    pub description: Option<String>,
+    pub status: String,
+    pub color: Option<String>, // 仅项目有颜色
+}

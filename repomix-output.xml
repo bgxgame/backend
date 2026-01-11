@@ -85,6 +85,45 @@ JWT_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxx
 .env
 </file>
 
+<file path="register2.json">
+{ "username": "brace3", "password": "myp" }
+</file>
+
+<file path="src/validation.rs">
+// src/validation.rs
+use axum::{
+    async_trait,
+    extract::{FromRequest, Request}, // 修正为 Request
+    Json,
+};
+use validator::Validate;
+use crate::AppError;
+
+pub struct ValidatedJson<T>(pub T);
+
+#[async_trait]
+impl<S, T> FromRequest<S> for ValidatedJson<T>
+where
+    S: Send + Sync,
+    T: Validate + serde::de::DeserializeOwned + 'static, // 增加 'static 约束
+{
+    type Rejection = AppError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        // 1. 利用 Axum 原生的 Json 提取器解析 Body
+        // 如果 JSON 格式非法（比如少括号），这里会直接返回 BadRequest
+        let Json(value) = Json::<T>::from_request(req, state).await
+            .map_err(|rejection| AppError::BadRequest(rejection.body_text()))?;
+        
+        // 2. 执行 validator 的校验逻辑
+        // 如果校验失败（比如标题太短），会通过 AppError::ValidationError 自动转换
+        value.validate()?; 
+        
+        Ok(ValidatedJson(value))
+    }
+}
+</file>
+
 <file path="init_schema.sql">
 -- 1. 清理旧表
 DROP TABLE IF EXISTS issues;
@@ -161,45 +200,17 @@ CREATE TABLE refresh_tokens (
     expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
-</file>
 
-<file path="register2.json">
-{ "username": "brace3", "password": "myp" }
-</file>
+CREATE TABLE comments (
+    id SERIAL PRIMARY KEY,
+    issue_id INTEGER NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
 
-<file path="src/validation.rs">
-// src/validation.rs
-use axum::{
-    async_trait,
-    extract::{FromRequest, Request}, // 修正为 Request
-    Json,
-};
-use validator::Validate;
-use crate::AppError;
-
-pub struct ValidatedJson<T>(pub T);
-
-#[async_trait]
-impl<S, T> FromRequest<S> for ValidatedJson<T>
-where
-    S: Send + Sync,
-    T: Validate + serde::de::DeserializeOwned + 'static, // 增加 'static 约束
-{
-    type Rejection = AppError;
-
-    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        // 1. 利用 Axum 原生的 Json 提取器解析 Body
-        // 如果 JSON 格式非法（比如少括号），这里会直接返回 BadRequest
-        let Json(value) = Json::<T>::from_request(req, state).await
-            .map_err(|rejection| AppError::BadRequest(rejection.body_text()))?;
-        
-        // 2. 执行 validator 的校验逻辑
-        // 如果校验失败（比如标题太短），会通过 AppError::ValidationError 自动转换
-        value.validate()?; 
-        
-        Ok(ValidatedJson(value))
-    }
-}
+-- 索引提高查询效率
+CREATE INDEX idx_comments_issue_id ON comments(issue_id);
 </file>
 
 <file path="README.md">
@@ -491,89 +502,6 @@ where
 }
 </file>
 
-<file path="src/main.rs">
-// src/main.rs
-use axum::{
-    http::Method,
-    routing::{delete, get, patch, post},
-    Router,
-};
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
-use std::net::SocketAddr;
-use tower_http::cors::{Any, CorsLayer};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-mod auth;
-mod error;
-mod handlers;
-mod models;
-mod validation;
-
-pub use error::AppError;
-
-use handlers::*;
-
-#[derive(Clone)]
-pub struct AppState {
-    pub db: PgPool,
-}
-
-#[tokio::main]
-async fn main() {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "debug".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
-    dotenvy::dotenv().ok();
-    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
-
-    let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&db_url)
-        .await
-        .expect("Failed to connect to Postgres");
-
-    tracing::info!("✅ 数据库连接成功!");
-
-    let state = AppState { db: pool };
-
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
-        .allow_headers(Any);
-
-    let app = Router::new()
-        // 认证
-        .route("/api/register", post(register_handler))
-        .route("/api/login", post(login_handler))
-        .route("/api/refresh", post(refresh_handler))
-        // 项目路由
-        .route("/api/projects", get(get_projects_handler))
-        .route("/api/projects", post(create_project_handler))
-        .route("/api/projects/:id", patch(update_project_handler))
-        .route("/api/projects/:id", delete(delete_project_handler))
-        // 任务路由
-        .route("/api/issues", get(get_all_my_issues_handler))
-        .route("/api/projects/:id/issues", get(get_project_issues_handler)) // 获取项目下的 Issue
-        .route("/api/issues", post(create_issue_handler))
-        .route("/api/issues/:id", patch(update_issue_handler))
-        .route("/api/issues/:id", delete(delete_issue_handler))
-        .with_state(state)
-        .layer(cors);
-
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    tracing::info!("🚀 服务器运行在: {}", addr);
-
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
-}
-</file>
-
 <file path="src/error.rs">
 // src/error.rs
 use axum::{
@@ -667,6 +595,91 @@ impl IntoResponse for AppError {
 
         (status, body).into_response()
     }
+}
+</file>
+
+<file path="src/main.rs">
+// src/main.rs
+use axum::{
+    http::Method,
+    routing::{delete, get, patch, post},
+    Router,
+};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
+use std::net::SocketAddr;
+use tower_http::cors::{Any, CorsLayer};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+mod auth;
+mod error;
+mod handlers;
+mod models;
+mod validation;
+
+pub use error::AppError;
+
+use handlers::*;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub db: PgPool,
+}
+
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "debug".into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    dotenvy::dotenv().ok();
+    let db_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set in .env");
+
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url)
+        .await
+        .expect("Failed to connect to Postgres");
+
+    tracing::info!("✅ 数据库连接成功!");
+
+    let state = AppState { db: pool };
+
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
+        .allow_headers(Any);
+
+    let app = Router::new()
+        // 认证
+        .route("/api/register", post(register_handler))
+        .route("/api/login", post(login_handler))
+        .route("/api/refresh", post(refresh_handler))
+        // 项目路由
+        .route("/api/projects", get(get_projects_handler))
+        .route("/api/projects", post(create_project_handler))
+        .route("/api/projects/:id", patch(update_project_handler))
+        .route("/api/projects/:id", delete(delete_project_handler))
+        // 任务路由
+        .route("/api/issues", get(get_all_my_issues_handler))
+        .route("/api/projects/:id/issues", get(get_project_issues_handler)) // 获取项目下的 Issue
+        .route("/api/issues", post(create_issue_handler))
+        .route("/api/issues/:id", patch(update_issue_handler))
+        .route("/api/issues/:id", delete(delete_issue_handler))
+        .route("/api/issues/:id/comments", get(get_issue_comments_handler))
+        .route("/api/issues/:id/comments", post(create_comment_handler))
+        .with_state(state)
+        .layer(cors);
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    tracing::info!("🚀 服务器运行在: {}", addr);
+
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
 }
 </file>
 
@@ -944,6 +957,58 @@ pub async fn refresh_handler(
         username: row.username,
     }))
 }
+
+pub async fn get_issue_comments_handler(
+    user: AuthUser,
+    Path(issue_id): Path<i32>,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<Comment>>, AppError> {
+    // 检查 Issue 是否存在且用户有权访问（通过项目所属权判断）
+    let comments = sqlx::query_as::<_, Comment>(
+        r#"
+        SELECT c.*, u.username 
+        FROM comments c
+        JOIN users u ON c.user_id = u.id
+        JOIN issues i ON c.issue_id = i.id
+        JOIN projects p ON i.project_id = p.id
+        WHERE c.issue_id = $1 AND p.user_id = $2
+        ORDER BY c.created_at ASC
+        "#
+    )
+    .bind(issue_id)
+    .bind(user.id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(comments))
+}
+
+pub async fn create_comment_handler(
+    user: AuthUser,
+    Path(issue_id): Path<i32>,
+    State(state): State<AppState>,
+    ValidatedJson(body): ValidatedJson<CreateCommentSchema>,
+) -> Result<Json<Comment>, AppError> {
+    // 插入评论
+    let comment = sqlx::query_as::<_, Comment>(
+        r#"
+        WITH inserted AS (
+            INSERT INTO comments (issue_id, user_id, content)
+            VALUES ($1, $2, $3)
+            RETURNING *
+        )
+        SELECT i.*, u.username FROM inserted i
+        JOIN users u ON i.user_id = u.id
+        "#
+    )
+    .bind(issue_id)
+    .bind(user.id)
+    .bind(body.content)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(comment))
+}
 </file>
 
 <file path="src/models.rs">
@@ -1059,6 +1124,22 @@ pub struct IssueQuery {
 #[derive(Debug, Deserialize)]
 pub struct RefreshRequest {
     pub refresh_token: String,
+}
+
+#[derive(Debug, sqlx::FromRow, serde::Serialize)]
+pub struct Comment {
+    pub id: i32,
+    pub issue_id: i32,
+    pub user_id: i32,
+    pub username: String, // 后面我们通过 JOIN 获取
+    pub content: String,
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, serde::Deserialize, validator::Validate)]
+pub struct CreateCommentSchema {
+    #[validate(length(min = 1, message = "评论内容不能为空"))]
+    pub content: String,
 }
 </file>
 

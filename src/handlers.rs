@@ -323,3 +323,41 @@ pub async fn create_comment_handler(
 
     Ok(Json(comment))
 }
+
+pub async fn unified_search_handler(
+    user: AuthUser,
+    Query(query): Query<IssueQuery>, // 复用包含 q 的 Query 结构
+    State(state): State<AppState>,
+) -> Result<Json<Vec<UnifiedSearchResult>>, AppError> {
+    let q = query.q.unwrap_or_default();
+    if q.trim().is_empty() {
+        return Ok(Json(vec![]));
+    }
+
+    let search_pattern = format!("%{}%", q);
+
+    // 使用 UNION ALL 将项目和任务的结果合并
+    // 注意：字段数量和类型必须对齐
+    let results = sqlx::query_as::<_, UnifiedSearchResult>(
+        r#"
+        SELECT 'project' as type, id, name as title, description, status, color 
+        FROM projects 
+        WHERE user_id = $1 AND (name ILIKE $2 OR description ILIKE $2)
+        
+        UNION ALL
+        
+        SELECT 'issue' as type, id, title, description, status, NULL as color 
+        FROM issues 
+        WHERE user_id = $1 AND (title ILIKE $2 OR description ILIKE $2)
+        
+        ORDER BY title ASC
+        LIMIT 15
+        "#
+    )
+    .bind(user.id)
+    .bind(search_pattern)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(results))
+}
